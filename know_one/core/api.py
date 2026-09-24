@@ -21,6 +21,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from hashlib import sha256
+import os
 import re
 from uuid import uuid4
 
@@ -28,6 +29,7 @@ import psycopg
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
+from know_one.config import load_local_env
 from know_one.errors import (
     AccessDenied,
     IdempotencyConflict,
@@ -51,22 +53,24 @@ class KnowOne:
     但不做连接池外的并发承诺。
     """
 
-    def __init__(self, dsn: str, *, embedding_endpoint: str | None = None) -> None:
+    def __init__(self, dsn: str | None = None, *, embedding_endpoint: str | None = None) -> None:
         """创建门面实例。
 
         Args:
-            dsn: PostgreSQL 连接串（ADR-0004），如
-                ``postgresql://knowone:knowone@localhost:5432/knowone``。
+            dsn: PostgreSQL 连接串（ADR-0004）。未传入时读取 ``KNOWONE_DSN``。
             embedding_endpoint: embedding 模型端点（OpenAI 兼容接口，
                 如 LM Studio ``http://192.168.2.6:1234/v1``）；
                 None 时从环境变量 KNOWONE_EMBEDDING_ENDPOINT 读取。
                 外部模型调用一律不进入数据库事务（pipeline.md「切块、向量化与写入」）。
         """
-        if not dsn.strip():
-            raise InvalidArgument("dsn 不能为空")
-        self._dsn = dsn
-        # M1 尚未调用 embedding；保留参数以维持已公开的构造函数契约。
-        self._embedding_endpoint = embedding_endpoint
+        load_local_env()
+        self._dsn = dsn or os.environ.get("KNOWONE_DSN", "")
+        if not self._dsn.strip():
+            raise InvalidArgument("dsn 不能为空；请传入 dsn 或设置 KNOWONE_DSN")
+        # M1 尚未调用 embedding；先统一读取配置，M2 接入模型客户端时复用。
+        self._embedding_endpoint = embedding_endpoint or os.environ.get(
+            "KNOWONE_EMBEDDING_ENDPOINT"
+        )
 
     # ------------------------------------------------------------------
     # 入库（M1 实现）

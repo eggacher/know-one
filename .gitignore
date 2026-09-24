@@ -3,6 +3,7 @@ __pycache__/
 .pytest_cache/
 .venv/
 *.egg-info/
+.env
 
 # 手册原文受版权保护，仅限本机使用，严禁入库推送
 data/

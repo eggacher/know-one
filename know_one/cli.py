@@ -7,6 +7,7 @@ import os
 from importlib import resources
 from typing import Sequence
 
+from know_one.config import load_local_env
 
 def _schema_sql() -> str:
     """读取随 Python 包发布的初始 schema，避免依赖当前工作目录。"""
@@ -27,6 +28,7 @@ def init_database(dsn: str) -> None:
 
 
 def _parser() -> argparse.ArgumentParser:
+    load_local_env()
     parser = argparse.ArgumentParser(description="KnowOne 本地管理命令")
     subcommands = parser.add_subparsers(dest="command", required=True)
     init_db = subcommands.add_parser("init-db", help="初始化空 PostgreSQL 数据库")

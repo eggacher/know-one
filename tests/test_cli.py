@@ -12,8 +12,12 @@ def test_help_is_available(capsys: pytest.CaptureFixture[str]) -> None:
     assert "init-db" in capsys.readouterr().out
 
 
-def test_init_db_requires_a_connection_string(capsys: pytest.CaptureFixture[str]) -> None:
+def test_init_db_requires_a_connection_string(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
     """未提供连接串时在连接数据库之前失败，避免误连默认库。"""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("KNOWONE_DSN", raising=False)
     with pytest.raises(SystemExit) as error:
         main(["init-db"])
 
