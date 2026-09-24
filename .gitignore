@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+*.egg-info/
+
+# 手册原文受版权保护，仅限本机使用，严禁入库推送
+data/
+
+# 构建产物
+build/
+dist/
