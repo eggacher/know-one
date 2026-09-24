@@ -53,7 +53,14 @@ class KnowOne:
     但不做连接池外的并发承诺。
     """
 
-    def __init__(self, dsn: str | None = None, *, embedding_endpoint: str | None = None) -> None:
+    def __init__(
+        self,
+        dsn: str | None = None,
+        *,
+        embedding_endpoint: str | None = None,
+        embedding_model: str | None = None,
+        embedding_dimensions: int | None = None,
+    ) -> None:
         """创建门面实例。
 
         Args:
@@ -62,6 +69,11 @@ class KnowOne:
                 如 LM Studio ``http://192.168.2.6:1234/v1``）；
                 None 时从环境变量 KNOWONE_EMBEDDING_ENDPOINT 读取。
                 外部模型调用一律不进入数据库事务（pipeline.md「切块、向量化与写入」）。
+            embedding_model: embedding 模型标识；None 时读取
+                ``KNOWONE_EMBEDDING_MODEL``。当前默认值为
+                ``Qwen/Qwen3-Embedding-0.6B``，后续 IndexGeneration 将保存它。
+            embedding_dimensions: 向量维度；None 时读取
+                ``KNOWONE_EMBEDDING_DIMENSIONS``，缺省使用 Qwen 0.6B 的 1024 维。
         """
         load_local_env()
         self._dsn = dsn or os.environ.get("KNOWONE_DSN", "")
@@ -71,6 +83,16 @@ class KnowOne:
         self._embedding_endpoint = embedding_endpoint or os.environ.get(
             "KNOWONE_EMBEDDING_ENDPOINT"
         )
+        self._embedding_model = embedding_model or os.environ.get("KNOWONE_EMBEDDING_MODEL")
+        configured_dimensions = embedding_dimensions or os.environ.get(
+            "KNOWONE_EMBEDDING_DIMENSIONS", "1024"
+        )
+        try:
+            self._embedding_dimensions = int(configured_dimensions)
+        except (TypeError, ValueError) as error:
+            raise InvalidArgument("KNOWONE_EMBEDDING_DIMENSIONS 必须是正整数") from error
+        if self._embedding_dimensions <= 0:
+            raise InvalidArgument("KNOWONE_EMBEDDING_DIMENSIONS 必须是正整数")
 
     # ------------------------------------------------------------------
     # 入库（M1 实现）
