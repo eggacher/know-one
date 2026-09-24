@@ -2,7 +2,7 @@
 
 可嵌入 Python 业务系统的知识入库与检索库，首个落地场景是中文客服 FAQ 和公告。
 
-**当前状态：已建立可安装的项目骨架与 PostgreSQL 初始 schema。公开类型和接口协议可导入；入库、发布、检索等业务逻辑尚未实现，也没有商用性能或质量验证。**
+**当前状态：已具备首条可运行的纯文本入库链路：提交任务、持久化来源快照、按空行切块并构建 ready Revision。发布、检索、PDF/HTML/Markdown 解析、embedding 与重排仍未实现，也没有商用性能或质量验证。**
 
 ## 范围与职责
 
@@ -14,13 +14,20 @@ KnowOne 负责知识构建、版本发布、受约束的混合检索及证据返
 
 ## 目标接口
 
-以下为后续实现目标的调用示意；`KnowOne` 是可从根包导入的业务门面，但入库、发布和检索方法仍在逐步实现中。参数、错误和一致性以 [接口契约](docs/contracts.md) 为准。
+`KnowOne` 可从根包导入。以下 `ingest → process_job → get_ingestion` 可在 M1 运行；发布和检索仍是后续接口。参数、错误和一致性以 [接口契约](docs/contracts.md) 为准。
 
 ```python
 # 调用方完成身份认证并计算可信 scope；客户端不能自行指定授权范围。
+from know_one import AccessScope, KnowOne
+from know_one.ingestion import TextSource
+
+kb = KnowOne("postgresql://knowone:knowone@localhost:5432/knowone")
+editor_scope = AccessScope("editor-1", frozenset({"game-a-cs"}), frozenset({"ingest"}))
+source = TextSource("问题：怎么找回密码？\n\n答案：请在登录页选择“忘记密码”。")
 job = kb.ingest(source, namespace="game-a-cs",
                 source_key="official/faq/password", access_scope=editor_scope,
                 idempotency_key="import-20260923-001")
+kb.process_job(job.job_id)  # M1 worker 入口；生产环境由后台 worker 调用。
 status = kb.get_ingestion(job.job_id, access_scope=editor_scope)
 # ready 表示构建完成、尚未发布。运营预览通过后：
 kb.publish(status.revision_id, namespace="game-a-cs",
@@ -54,7 +61,7 @@ docker compose up -d db
 python -m know_one init-db --dsn postgresql://knowone:knowone@localhost:5432/knowone
 ```
 
-`know_one/model/__init__.py` 定义公开数据类型，`know_one/core/api.py` 定义 `KnowOne` 业务门面；`python -m know_one --help` 可查看本地管理命令。`init-db` 使用 `know_one/storage/schema.sql` 初始化空数据库，尚无版本化迁移；它只应对空数据库执行一次。
+`know_one/model/__init__.py` 定义公开数据类型，`know_one/core/api.py` 定义 `KnowOne` 业务门面；`python -m know_one --help` 可查看本地管理命令。`init-db` 使用 `know_one/storage/schema.sql` 初始化空数据库，只应执行一次。已有旧 schema 的开发库需先人工审阅并执行 `know_one/storage/migrations/0001_persist_ingestion_source.sql`；该迁移拒绝为旧任务伪造来源快照。
 
 ## 文档入口
 

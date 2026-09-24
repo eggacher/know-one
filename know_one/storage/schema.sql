@@ -51,7 +51,9 @@ CREATE TABLE document_revision (
     content_ref text NOT NULL,
     source_snapshot jsonb NOT NULL DEFAULT '{}'::jsonb,
     created_at timestamptz NOT NULL DEFAULT now(),
-    UNIQUE (document_id, id)
+    UNIQUE (document_id, id),
+    -- 同一 Document 的相同内容复用同一 Revision；不能跨 Document 去重。
+    UNIQUE (document_id, content_hash)
 );
 
 CREATE TABLE publication (
@@ -115,6 +117,11 @@ CREATE TABLE ingestion_job (
     namespace_id uuid NOT NULL REFERENCES namespace(id),
     source_key text NOT NULL,
     source_ref text NOT NULL,
+    -- 入库时固定来源快照，保证异步 worker 不依赖临时文件或外部 URL。
+    source_bytes bytea NOT NULL,
+    source_media_type text NOT NULL,
+    source_snapshot jsonb NOT NULL DEFAULT '{}'::jsonb,
+    content_hash text NOT NULL,
     idempotency_key text NOT NULL,
     request_fingerprint text NOT NULL,
     status text NOT NULL CHECK (

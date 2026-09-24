@@ -13,7 +13,7 @@ dev = [
 ]
 
 [tool.setuptools.package-data]
-"know_one.storage" = ["schema.sql"]
+"know_one.storage" = ["schema.sql", "migrations/*.sql"]
 
 [build-system]
 requires = ["setuptools>=68"]

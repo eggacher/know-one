@@ -20,11 +20,19 @@ publish / withdraw / set_access / delete / retrieve 为已定义契约的占位�
 from __future__ import annotations
 
 from datetime import datetime
+from hashlib import sha256
+import re
+from uuid import uuid4
+
+import psycopg
+from psycopg.rows import dict_row
+from psycopg.types.json import Jsonb
 
 from know_one.errors import (
     AccessDenied,
     IdempotencyConflict,
     InvalidArgument,
+    NotFoundOrForbidden,
     UnsupportedSource,
 )
 from know_one.model import (
@@ -54,6 +62,11 @@ class KnowOne:
                 None 时从环境变量 KNOWONE_EMBEDDING_ENDPOINT 读取。
                 外部模型调用一律不进入数据库事务（pipeline.md「切块、向量化与写入」）。
         """
+        if not dsn.strip():
+            raise InvalidArgument("dsn 不能为空")
+        self._dsn = dsn
+        # M1 尚未调用 embedding；保留参数以维持已公开的构造函数契约。
+        self._embedding_endpoint = embedding_endpoint
 
     # ------------------------------------------------------------------
     # 入库（M1 实现）
@@ -103,7 +116,97 @@ class KnowOne:
             UnsupportedSource: 媒体类型没有已注册的解析器。
             IdempotencyConflict: 同键不同请求指纹。
         """
-        raise NotImplementedError
+        self._require_permission(access_scope, namespace, "ingest")
+        self._validate_ingest_arguments(source, namespace, source_key, idempotency_key)
+
+        source_bytes = source.snapshot()
+        try:
+            source_bytes.decode("utf-8")
+        except UnicodeDecodeError as error:
+            raise InvalidArgument("text/plain 来源必须是 UTF-8 编码") from error
+        if not source_bytes.strip():
+            raise InvalidArgument("来源文本不能为空")
+
+        source_snapshot = source.describe()
+        if not isinstance(source_snapshot, dict):
+            raise InvalidArgument("source.describe() 必须返回字典")
+
+        content_hash = sha256(source_bytes).hexdigest()
+        request_fingerprint = self._fingerprint(source_key, content_hash, source.media_type)
+
+        with self._connect() as connection, connection.transaction():
+            namespace_row = self._namespace_row(connection, namespace)
+            receipt = connection.execute(
+                """
+                SELECT request_fingerprint, result_ref
+                FROM operation_receipt
+                WHERE namespace_id = %(namespace_id)s
+                  AND operation = 'ingest'
+                  AND idempotency_key = %(idempotency_key)s
+                FOR UPDATE
+                """,
+                {"namespace_id": namespace_row["id"], "idempotency_key": idempotency_key},
+            ).fetchone()
+            if receipt:
+                if receipt["request_fingerprint"] != request_fingerprint:
+                    raise IdempotencyConflict("同一幂等键对应了不同的入库请求")
+                result = receipt["result_ref"]
+                return IngestionJobRef(
+                    job_id=str(result["job_id"]),
+                    namespace=namespace,
+                    status=result["status"],
+                )
+
+            document_id = self._ensure_document(
+                connection, namespace_row["id"], source_key, access_scope.principal_id
+            )
+            job_id = str(uuid4())
+            source_ref = str(source_snapshot.get("source_name", "inline-text"))
+            connection.execute(
+                """
+                INSERT INTO ingestion_job (
+                    id, namespace_id, source_key, source_ref, source_bytes,
+                    source_media_type, source_snapshot, content_hash,
+                    idempotency_key, request_fingerprint, status
+                ) VALUES (
+                    %(id)s, %(namespace_id)s, %(source_key)s, %(source_ref)s,
+                    %(source_bytes)s, %(source_media_type)s, %(source_snapshot)s,
+                    %(content_hash)s, %(idempotency_key)s, %(request_fingerprint)s, 'queued'
+                )
+                """,
+                {
+                    "id": job_id,
+                    "namespace_id": namespace_row["id"],
+                    "source_key": source_key,
+                    "source_ref": source_ref,
+                    "source_bytes": source_bytes,
+                    "source_media_type": source.media_type,
+                    "source_snapshot": Jsonb(source_snapshot),
+                    "content_hash": content_hash,
+                    "idempotency_key": idempotency_key,
+                    "request_fingerprint": request_fingerprint,
+                },
+            )
+            result = {"job_id": job_id, "status": "queued", "document_id": str(document_id)}
+            connection.execute(
+                """
+                INSERT INTO operation_receipt (
+                    id, namespace_id, operation, idempotency_key,
+                    request_fingerprint, status, result_ref, completed_at
+                ) VALUES (
+                    %(id)s, %(namespace_id)s, 'ingest', %(idempotency_key)s,
+                    %(request_fingerprint)s, 'succeeded', %(result_ref)s, now()
+                )
+                """,
+                {
+                    "id": str(uuid4()),
+                    "namespace_id": namespace_row["id"],
+                    "idempotency_key": idempotency_key,
+                    "request_fingerprint": request_fingerprint,
+                    "result_ref": Jsonb(result),
+                },
+            )
+        return IngestionJobRef(job_id=job_id, namespace=namespace, status="queued")
 
     def get_ingestion(self, job_id: str, access_scope: AccessScope) -> IngestionStatus:
         """查询入库任务的阶段、进度与结果。
@@ -127,7 +230,37 @@ class KnowOne:
             AccessDenied: scope 无权访问该任务。
             NotFoundOrForbidden: 任务不存在或无权知晓。
         """
-        raise NotImplementedError
+        if not job_id.strip():
+            raise InvalidArgument("job_id 不能为空")
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT job.id, ns.name AS namespace, job.status, job.stage,
+                       job.attempt_count, job.error_code, job.result_revision_id,
+                       build.expected_chunk_count, build.completed_chunk_count
+                FROM ingestion_job AS job
+                JOIN namespace AS ns ON ns.id = job.namespace_id
+                LEFT JOIN revision_index_build AS build
+                  ON build.revision_id = job.result_revision_id
+                 AND build.index_generation_id = ns.current_index_generation_id
+                WHERE job.id = %s
+                """,
+                (job_id,),
+            ).fetchone()
+        if row is None:
+            raise NotFoundOrForbidden("任务不存在或无权访问")
+        self._require_permission(access_scope, row["namespace"], "ingest")
+        return IngestionStatus(
+            job_id=str(row["id"]),
+            namespace=row["namespace"],
+            status=row["status"],
+            stage=row["stage"],
+            progress_done=row["completed_chunk_count"] or 0,
+            progress_total=row["expected_chunk_count"],
+            error_code=row["error_code"],
+            attempt_count=row["attempt_count"],
+            revision_id=(str(row["result_revision_id"]) if row["result_revision_id"] else None),
+        )
 
     def process_job(self, job_id: str, *, lease_seconds: int = 300) -> None:
         """worker 执行入口：领取并处理一个任务（实现层方法，不属于对外契约）。
@@ -149,7 +282,263 @@ class KnowOne:
             lease_seconds: 本次租约时长（秒）；超时未完成视为 worker 失联，
                 任务可被其他 worker 重新领取。
         """
-        raise NotImplementedError
+        if lease_seconds <= 0:
+            raise InvalidArgument("lease_seconds 必须大于 0")
+        try:
+            self._process_job(job_id, lease_seconds)
+        except (InvalidArgument, NotFoundOrForbidden):
+            # 未领取的任务、已被其他 worker 持有等预期状态不能被误标失败。
+            raise
+        except Exception:
+            # 处理事务会回滚；另开短事务仅记录失败状态，供调用方和重试器观察。
+            self._mark_job_failed(job_id)
+            raise
+
+    def _connect(self) -> psycopg.Connection:
+        """创建一个短生命周期连接；M1 避免过早引入连接池配置。"""
+        return psycopg.connect(self._dsn, row_factory=dict_row)
+
+    @staticmethod
+    def _require_permission(scope: AccessScope, namespace: str, permission: str) -> None:
+        """在任何数据库写入前失败关闭地检查调用方授权。"""
+        if not scope.allows(namespace, permission):
+            raise AccessDenied(f"无权在 Namespace {namespace!r} 执行 {permission}")
+
+    @staticmethod
+    def _validate_ingest_arguments(
+        source: Source, namespace: str, source_key: str, idempotency_key: str
+    ) -> None:
+        """M1 的输入边界：只处理调用方已准备好的 UTF-8 纯文本。"""
+        if not namespace.strip() or not source_key.strip() or not idempotency_key.strip():
+            raise InvalidArgument("namespace、source_key 和 idempotency_key 均不能为空")
+        if len(source_key) > 512:
+            raise InvalidArgument("source_key 不能超过 512 个字符")
+        if getattr(source, "media_type", None) != "text/plain":
+            raise UnsupportedSource("M1 仅支持 text/plain 来源")
+
+    @staticmethod
+    def _fingerprint(source_key: str, content_hash: str, media_type: str) -> str:
+        """用稳定字段生成幂等比较指纹，不把可变来源名称混进去。"""
+        value = f"{source_key}\0{content_hash}\0{media_type}".encode()
+        return sha256(value).hexdigest()
+
+    @staticmethod
+    def _namespace_row(connection: psycopg.Connection, namespace: str) -> dict:
+        """读取 Namespace 与当前索引代；M1 不替部署方自动创建它们。"""
+        row = connection.execute(
+            "SELECT id, current_index_generation_id FROM namespace WHERE name = %s",
+            (namespace,),
+        ).fetchone()
+        if row is None:
+            raise NotFoundOrForbidden("Namespace 不存在或无权访问")
+        if row["current_index_generation_id"] is None:
+            raise InvalidArgument("Namespace 尚未设置当前 IndexGeneration")
+        return row
+
+    @staticmethod
+    def _ensure_document(
+        connection: psycopg.Connection,
+        namespace_id: object,
+        source_key: str,
+        principal_id: str,
+    ) -> object:
+        """在提交时预留 Document 身份，并只在首次创建时写入默认 ACL。"""
+        row = connection.execute(
+            """
+            SELECT id FROM document
+            WHERE namespace_id = %s AND source_key = %s
+            FOR UPDATE
+            """,
+            (namespace_id, source_key),
+        ).fetchone()
+        if row:
+            return row["id"]
+        document_id = uuid4()
+        connection.execute(
+            """
+            INSERT INTO document (id, namespace_id, source_key, acl)
+            VALUES (%s, %s, %s, %s)
+            """,
+            (document_id, namespace_id, source_key, Jsonb({"principals": [principal_id]})),
+        )
+        return document_id
+
+    @staticmethod
+    def _paragraphs(text: str) -> list[tuple[str, int, int]]:
+        """按空行切分连续原文段落，保留字符区间供证据定位。
+
+        这是有意保守的 M1 兜底切块；标题树、FAQ、表格及句子依赖关系由
+        后续解析器提供后再接入，不在这里假装理解语义。
+        """
+        chunks: list[tuple[str, int, int]] = []
+        for match in re.finditer(r"\S(?:.*?\S)?(?=\s*\n\s*\n|\s*\Z)", text, re.DOTALL):
+            raw_text = match.group(0)
+            chunks.append((raw_text, match.start(), match.end()))
+        return chunks
+
+    def _process_job(self, job_id: str, lease_seconds: int) -> None:
+        """在一个短事务内完成 M1 的纯文本构建，不调用外部模型。"""
+        with self._connect() as connection, connection.transaction():
+            job = connection.execute(
+                """
+                SELECT job.*, ns.current_index_generation_id
+                FROM ingestion_job AS job
+                JOIN namespace AS ns ON ns.id = job.namespace_id
+                WHERE job.id = %s
+                FOR UPDATE
+                """,
+                (job_id,),
+            ).fetchone()
+            if job is None:
+                raise NotFoundOrForbidden("任务不存在或无权访问")
+            if job["status"] == "ready":
+                return
+            if job["status"] not in {"queued", "running"}:
+                raise InvalidArgument(f"任务状态 {job['status']} 不能被处理")
+            if job["status"] == "running" and job["lease_expires_at"] is not None:
+                lease = job["lease_expires_at"]
+                if lease > datetime.now(lease.tzinfo):
+                    raise InvalidArgument("任务正在被其他 worker 处理")
+            if job["current_index_generation_id"] is None:
+                raise InvalidArgument("Namespace 尚未设置当前 IndexGeneration")
+
+            connection.execute(
+                """
+                UPDATE ingestion_job
+                SET status = 'running', stage = 'chunking', attempt_count = attempt_count + 1,
+                    lease_expires_at = now() + (%s * interval '1 second'), updated_at = now()
+                WHERE id = %s
+                """,
+                (lease_seconds, job_id),
+            )
+            text = bytes(job["source_bytes"]).decode("utf-8")
+            paragraphs = self._paragraphs(text)
+            if not paragraphs:
+                raise InvalidArgument("来源中没有可切分的文本段落")
+
+            document = connection.execute(
+                """
+                SELECT id FROM document
+                WHERE namespace_id = %s AND source_key = %s
+                FOR UPDATE
+                """,
+                (job["namespace_id"], job["source_key"]),
+            ).fetchone()
+            if document is None:
+                raise InvalidArgument("任务对应的 Document 不存在")
+            revision = connection.execute(
+                """
+                SELECT id FROM document_revision
+                WHERE document_id = %s AND content_hash = %s
+                """,
+                (document["id"], job["content_hash"]),
+            ).fetchone()
+            if revision is None:
+                revision_id = uuid4()
+                connection.execute(
+                    """
+                    INSERT INTO document_revision (
+                        id, document_id, content_hash, content_ref, source_snapshot
+                    ) VALUES (%s, %s, %s, %s, %s)
+                    """,
+                    (
+                        revision_id,
+                        document["id"],
+                        job["content_hash"],
+                        f"ingestion-job://{job_id}",
+                        Jsonb(job["source_snapshot"]),
+                    ),
+                )
+            else:
+                revision_id = revision["id"]
+
+            generation_id = job["current_index_generation_id"]
+            build = connection.execute(
+                """
+                SELECT status FROM revision_index_build
+                WHERE revision_id = %s AND index_generation_id = %s
+                FOR UPDATE
+                """,
+                (revision_id, generation_id),
+            ).fetchone()
+            if build and build["status"] == "ready":
+                self._finish_job(connection, job_id, revision_id)
+                return
+            if build:
+                # 失败重试从同一 revision 的干净构建开始，避免残留半成品。
+                connection.execute(
+                    "DELETE FROM chunk WHERE revision_id = %s AND index_generation_id = %s",
+                    (revision_id, generation_id),
+                )
+                connection.execute(
+                    """
+                    UPDATE revision_index_build
+                    SET status = 'building', expected_chunk_count = NULL,
+                        completed_chunk_count = 0, error_code = NULL, completed_at = NULL
+                    WHERE revision_id = %s AND index_generation_id = %s
+                    """,
+                    (revision_id, generation_id),
+                )
+            else:
+                connection.execute(
+                    """
+                    INSERT INTO revision_index_build (revision_id, index_generation_id, status)
+                    VALUES (%s, %s, 'building')
+                    """,
+                    (revision_id, generation_id),
+                )
+
+            for ordinal, (raw_text, start, end) in enumerate(paragraphs):
+                connection.execute(
+                    """
+                    INSERT INTO chunk (
+                        id, namespace_id, revision_id, index_generation_id, ordinal,
+                        raw_text, search_text, source_locator, tsv
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s,
+                              to_tsvector('simple', %s))
+                    """,
+                    (
+                        uuid4(), job["namespace_id"], revision_id, generation_id, ordinal,
+                        raw_text, raw_text,
+                        Jsonb({"char_start": start, "char_end": end}), raw_text,
+                    ),
+                )
+            connection.execute(
+                """
+                UPDATE revision_index_build
+                SET status = 'ready', expected_chunk_count = %s,
+                    completed_chunk_count = %s, completed_at = now()
+                WHERE revision_id = %s AND index_generation_id = %s
+                """,
+                (len(paragraphs), len(paragraphs), revision_id, generation_id),
+            )
+            self._finish_job(connection, job_id, revision_id)
+
+    @staticmethod
+    def _finish_job(connection: psycopg.Connection, job_id: str, revision_id: object) -> None:
+        """只在对应构建已完整 ready 后把任务标为成功。"""
+        connection.execute(
+            """
+            UPDATE ingestion_job
+            SET status = 'ready', stage = 'ready', result_revision_id = %s,
+                lease_expires_at = NULL, error_code = NULL, updated_at = now()
+            WHERE id = %s
+            """,
+            (revision_id, job_id),
+        )
+
+    def _mark_job_failed(self, job_id: str) -> None:
+        """将可识别的处理异常暴露为任务失败；失败细节仍由 worker 日志保存。"""
+        with self._connect() as connection, connection.transaction():
+            connection.execute(
+                """
+                UPDATE ingestion_job
+                SET status = 'failed', stage = 'failed', error_code = 'PROCESSING_FAILED',
+                    lease_expires_at = NULL, updated_at = now()
+                WHERE id = %s AND status <> 'ready'
+                """,
+                (job_id,),
+            )
 
     # ------------------------------------------------------------------
     # 发布与生命周期管理（M2 实现；契约已定，先占位）
