@@ -30,6 +30,7 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
 from know_one.config import load_local_env
+from know_one.embedding import OpenAIEmbeddingClient
 from know_one.errors import (
     AccessDenied,
     IdempotencyConflict,
@@ -403,15 +404,18 @@ class KnowOne:
         return chunks
 
     def _process_job(self, job_id: str, lease_seconds: int) -> None:
-        """在一个短事务内完成 M1 的纯文本构建，不调用外部模型。"""
+        """先领取任务并在事务外生成向量，再用短事务写入完整构建。"""
         with self._connect() as connection, connection.transaction():
             job = connection.execute(
                 """
-                SELECT job.*, ns.current_index_generation_id
+                SELECT job.*, ns.current_index_generation_id,
+                       generation.embedding_model, generation.dims
                 FROM ingestion_job AS job
                 JOIN namespace AS ns ON ns.id = job.namespace_id
+                LEFT JOIN index_generation AS generation
+                  ON generation.id = ns.current_index_generation_id
                 WHERE job.id = %s
-                FOR UPDATE
+                FOR UPDATE OF job
                 """,
                 (job_id,),
             ).fetchone()
@@ -427,6 +431,8 @@ class KnowOne:
                     raise InvalidArgument("任务正在被其他 worker 处理")
             if job["current_index_generation_id"] is None:
                 raise InvalidArgument("Namespace 尚未设置当前 IndexGeneration")
+            if job["embedding_model"] != self._embedding_model or job["dims"] != self._embedding_dimensions:
+                raise InvalidArgument("当前 IndexGeneration 与本地 embedding 模型或维度不一致")
 
             connection.execute(
                 """
@@ -437,11 +443,17 @@ class KnowOne:
                 """,
                 (lease_seconds, job_id),
             )
-            text = bytes(job["source_bytes"]).decode("utf-8")
-            paragraphs = self._paragraphs(text)
-            if not paragraphs:
-                raise InvalidArgument("来源中没有可切分的文本段落")
 
+        text = bytes(job["source_bytes"]).decode("utf-8")
+        paragraphs = self._paragraphs(text)
+        if not paragraphs:
+            raise InvalidArgument("来源中没有可切分的文本段落")
+        # 外部网络调用绝不放入数据库事务，避免长时间持锁。
+        vectors = OpenAIEmbeddingClient(
+            self._embedding_endpoint, self._embedding_model, self._embedding_dimensions
+        ).embed([raw_text for raw_text, _, _ in paragraphs])
+
+        with self._connect() as connection, connection.transaction():
             document = connection.execute(
                 """
                 SELECT id FROM document
@@ -514,19 +526,20 @@ class KnowOne:
                     (revision_id, generation_id),
                 )
 
-            for ordinal, (raw_text, start, end) in enumerate(paragraphs):
+            for ordinal, ((raw_text, start, end), vector) in enumerate(zip(paragraphs, vectors, strict=True)):
                 connection.execute(
                     """
                     INSERT INTO chunk (
                         id, namespace_id, revision_id, index_generation_id, ordinal,
-                        raw_text, search_text, source_locator, tsv
+                        raw_text, search_text, source_locator, embedding, tsv
                     ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s,
-                              to_tsvector('simple', %s))
+                              CAST(%s AS vector), to_tsvector('simple', %s))
                     """,
                     (
                         uuid4(), job["namespace_id"], revision_id, generation_id, ordinal,
                         raw_text, raw_text,
-                        Jsonb({"char_start": start, "char_end": end}), raw_text,
+                        Jsonb({"char_start": start, "char_end": end}),
+                        "[" + ",".join(str(value) for value in vector) + "]", raw_text,
                     ),
                 )
             connection.execute(

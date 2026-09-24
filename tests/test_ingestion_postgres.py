@@ -21,7 +21,9 @@ def dsn() -> str:
     return value
 
 
-def test_plain_text_ingestion_creates_ready_revision_and_chunks(dsn: str) -> None:
+def test_plain_text_ingestion_creates_ready_revision_and_chunks(
+    dsn: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """纯文本提交后，任务、Revision、构建记录和段落 Chunk 应完整关联。"""
     namespace_id, generation_id = uuid4(), uuid4()
     namespace = f"test-{uuid4()}"
@@ -32,7 +34,7 @@ def test_plain_text_ingestion_creates_ready_revision_and_chunks(dsn: str) -> Non
             INSERT INTO index_generation (
                 id, namespace_id, config_fingerprint, embedding_model,
                 tokenizer_version, dims, distance, status
-            ) VALUES (%s, %s, 'test', 'not-used-in-m1', 'test', 3, 'cosine', 'active')
+            ) VALUES (%s, %s, 'test', 'Qwen/Qwen3-Embedding-0.6B', 'test', 1024, 'cosine', 'active')
             """,
             (generation_id, namespace_id),
         )
@@ -43,6 +45,11 @@ def test_plain_text_ingestion_creates_ready_revision_and_chunks(dsn: str) -> Non
 
     scope = AccessScope("tester", frozenset({namespace}), frozenset({"ingest"}))
     kb = KnowOne(dsn)
+    # 验证数据库写入链路，不依赖开发机是否启动实际模型服务。
+    monkeypatch.setattr(
+        "know_one.core.api.OpenAIEmbeddingClient.embed",
+        lambda _client, texts: [[0.01] * 1024 for _ in texts],
+    )
     source = TextSource("保养周期为 5000 公里。\n\n如遇极端工况，请缩短保养周期。")
 
     ref = kb.ingest(source, namespace, "maintenance", scope, "request-1")
@@ -58,7 +65,7 @@ def test_plain_text_ingestion_creates_ready_revision_and_chunks(dsn: str) -> Non
 
     with psycopg.connect(dsn) as connection:
         chunks = connection.execute(
-            "SELECT raw_text, source_locator FROM chunk WHERE revision_id = %s ORDER BY ordinal",
+            "SELECT raw_text, source_locator, vector_dims(embedding) FROM chunk WHERE revision_id = %s ORDER BY ordinal",
             (status.revision_id,),
         ).fetchall()
         build = connection.execute(
@@ -70,4 +77,5 @@ def test_plain_text_ingestion_creates_ready_revision_and_chunks(dsn: str) -> Non
         ).fetchone()
     assert [chunk[0] for chunk in chunks] == ["保养周期为 5000 公里。", "如遇极端工况，请缩短保养周期。"]
     assert chunks[0][1]["char_start"] == 0
+    assert [chunk[2] for chunk in chunks] == [1024, 1024]
     assert build == ("ready", 2, 2)

@@ -23,7 +23,7 @@ ingest → 持久任务
 
 默认使用“结构优先 + 句子边界 + token 上限”，标题路径首版即保留。FAQ 包含问题和答案；表格片段携带表头。具体阈值、例外和 NLP 实验见 [切块策略](chunking.md)。
 
-BGE-M3 可作为初始 embedding 基线，官方规格为 1024 维、8192 token；实际输入还受配置、tokenizer、标题前缀和后续 reranker 限制，不能按汉字数估算。[模型资料](https://huggingface.co/BAAI/bge-m3)
+当前 embedding 基线为 Qwen3-Embedding-0.6B，输出 1024 维；实际输入仍受配置、tokenizer、标题前缀和后续 reranker 限制，不能按汉字数估算。模型与维度由 IndexGeneration 冻结，不能只改环境变量后混写旧索引。[模型资料](https://github.com/QwenLM/Qwen3-Embedding)
 
 批量 embedding 在数据库写事务外完成，检查结果条数、维度和数值有效性。草稿数据分批持久化但对检索不可见；完整性校验通过后标记 ready。单个 DocumentRevision 是发布原子单位，批量 Source 可产生多个独立任务及逐项结果，首版不承诺跨文档批次原子发布。
 
