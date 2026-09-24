@@ -14,7 +14,7 @@ KnowOne 负责知识构建、版本发布、受约束的混合检索及证据返
 
 ## 目标接口
 
-以下为后续实现目标的调用示意；目前 `KnowledgeBase` 只是接口协议，不能直接实例化为可工作的知识库。参数、错误和一致性以 [接口契约](docs/contracts.md) 为准。
+以下为后续实现目标的调用示意；`KnowOne` 是可从根包导入的业务门面，但入库、发布和检索方法仍在逐步实现中。参数、错误和一致性以 [接口契约](docs/contracts.md) 为准。
 
 ```python
 # 调用方完成身份认证并计算可信 scope；客户端不能自行指定授权范围。
@@ -51,10 +51,10 @@ result = kb.retrieve(query="怎么找回密码啊", namespace="game-a-cs",
 python -m pip install -e '.[dev]'
 python -m pytest -q
 docker compose up -d db
-docker compose exec -T db psql -v ON_ERROR_STOP=1 -U knowone -d knowone -f /dev/stdin < know_one/storage/schema.sql
+python -m know_one init-db --dsn postgresql://knowone:knowone@localhost:5432/knowone
 ```
 
-`know_one/model/types.py` 定义公开数据类型，`know_one/core/api.py` 定义待实现的 `KnowledgeBase` 接口；`know_one/storage/schema.sql` 是仅供空数据库初始化的 schema，尚无版本化迁移。建表命令只应在空数据库执行一次，不要在已有数据的数据库重复执行。
+`know_one/model/__init__.py` 定义公开数据类型，`know_one/core/api.py` 定义 `KnowOne` 业务门面；`python -m know_one --help` 可查看本地管理命令。`init-db` 使用 `know_one/storage/schema.sql` 初始化空数据库，尚无版本化迁移；它只应对空数据库执行一次。
 
 ## 文档入口
 

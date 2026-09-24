@@ -1,36 +1,27 @@
-from datetime import datetime, timezone
-from uuid import uuid4
-
-import pytest
-
-from know_one import AccessScope, Evidence, EvidencePart, JobState, KnowledgeBase, SourceLocator
+from know_one import AccessScope, InvalidArgument, KnowOne
+from know_one.core.api import _validate_timezone
 
 
-def test_public_contract_is_importable() -> None:
-    assert KnowledgeBase is not None
-    assert JobState.READY.value == "ready"
+def test_public_entry_is_importable() -> None:
+    """调用方只需从根包导入门面和领域类型。"""
+    assert KnowOne is not None
 
 
-def test_scope_rejects_naive_expiration() -> None:
-    with pytest.raises(ValueError, match="timezone-aware"):
-        AccessScope("editor", frozenset({"game-a"}), frozenset({"ingest"}), expires_at=datetime(2026, 1, 1))
-
-
-def test_evidence_keeps_supplemental_source_separate() -> None:
-    primary = SourceLocator("immutable:faq-v1", 0, 18)
-    exception = SourceLocator("immutable:faq-v1", 100, 113)
-    evidence = Evidence(
-        text="普通道具购买后 7 日内可申请退款。",
-        document_id=uuid4(),
-        revision_id=uuid4(),
-        chunk_id=uuid4(),
-        source_locator=primary,
-        context_parts=(EvidencePart("但已使用道具不支持退款。", exception),),
-        valid_from=datetime(2026, 1, 1, tzinfo=timezone.utc),
+def test_scope_checks_namespace_and_operation_together() -> None:
+    scope = AccessScope(
+        principal_id="editor",
+        namespaces=frozenset({"game-a"}),
+        permissions=frozenset({"ingest"}),
     )
-    assert evidence.source_locator != evidence.context_parts[0].source_locator
 
+    assert scope.allows("game-a", "ingest")
+    assert not scope.allows("game-a", "publish")
+    assert not scope.allows("game-b", "ingest")
 
-def test_locator_rejects_empty_interval() -> None:
-    with pytest.raises(ValueError, match="start < end"):
-        SourceLocator("immutable:faq-v1", 5, 5)
+def test_naive_time_is_rejected() -> None:
+    from datetime import datetime
+
+    import pytest
+
+    with pytest.raises(InvalidArgument, match="时区"):
+        _validate_timezone(datetime(2026, 1, 1), field_name="valid_from")

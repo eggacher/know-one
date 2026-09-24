@@ -1,7 +1,7 @@
-"""KnowOne 对外契约；业务实现会在这些类型和接口之后接入。"""
+"""KnowOne 的公开入口与调用方需要处理的领域类型。"""
 
-from know_one.core.api import KnowledgeBase
-from know_one.core.errors import (
+from know_one.core.api import KnowOne
+from know_one.errors import (
     AccessDenied,
     ConcurrentModification,
     DeadlineExceeded,
@@ -16,17 +16,11 @@ from know_one.core.errors import (
     RateLimited,
     UnsupportedSource,
 )
-from know_one.model.types import (
+from know_one.model import (
     AccessScope,
-    Evidence,
-    EvidencePart,
     IngestionJobRef,
     IngestionStatus,
-    JobState,
-    PublicationResult,
-    RetrievalResult,
     Source,
-    SourceLocator,
 )
 
 __all__ = [
@@ -35,23 +29,17 @@ __all__ = [
     "ConcurrentModification",
     "DeadlineExceeded",
     "DependencyUnavailable",
-    "Evidence",
-    "EvidencePart",
     "IdempotencyConflict",
     "IngestionFailed",
     "IngestionJobRef",
     "IngestionStatus",
     "InvalidArgument",
-    "JobState",
-    "KnowledgeBase",
+    "KnowOne",
     "KnowOneError",
     "NeedsReview",
     "NotFoundOrForbidden",
     "PublicationConflict",
-    "PublicationResult",
     "RateLimited",
-    "RetrievalResult",
     "Source",
-    "SourceLocator",
     "UnsupportedSource",
 ]
