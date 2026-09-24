@@ -1,0 +1,28 @@
+[project]
+name = "know-one"
+version = "0.1.0"
+description = "统一入库与检索能力的知识库业务模块"
+requires-python = ">=3.12"
+dependencies = [
+    "psycopg[binary]>=3.2",       # PostgreSQL 驱动（worker 批量场景用同步接口）
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+]
+
+[tool.setuptools.package-data]
+"know_one.storage" = ["schema.sql"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["know_one*"]
+
+# PDF 解析依赖外部 poppler 工具（pdftotext / pdftoppm）：
+#   macOS: brew install poppler
+# 这是有意选择：poppler 的 -bbox 模式给出词级坐标，是 rav4 实战验证过的方案，
+# 不引入 PyMuPDF 等重依赖（许可与行为差异另议）。

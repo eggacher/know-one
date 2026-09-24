@@ -1,0 +1,23 @@
+# KnowOne 本地开发存储：PostgreSQL + pgvector（ADR-0004）
+# 启动：docker compose up -d
+# 建表：psql -h localhost -U knowone -d knowone -f know_one/storage/schema.sql
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    container_name: knowone-db
+    environment:
+      POSTGRES_USER: knowone
+      POSTGRES_PASSWORD: knowone
+      POSTGRES_DB: knowone
+    ports:
+      - "5432:5432"
+    volumes:
+      - knowone-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U knowone -d knowone"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  knowone-pgdata:
