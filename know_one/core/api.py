@@ -1234,7 +1234,64 @@ class KnowOne:
         - 共享原文引用需引用计数检查；
         - 保留不含正文的最小删除审计；物理清理期限由部署策略约定。
         """
-        raise NotImplementedError
+        if not document_id.strip() or not idempotency_key.strip():
+            raise InvalidArgument("document_id 和 idempotency_key 均不能为空")
+        fingerprint = sha256(json.dumps({"document_id": document_id}, sort_keys=True).encode()).hexdigest()
+        with self._connect() as connection, connection.transaction():
+            document = connection.execute(
+                """
+                SELECT document.id, document.state_generation, namespace.id AS namespace_id,
+                       namespace.name AS namespace
+                FROM document JOIN namespace ON namespace.id = document.namespace_id
+                WHERE document.id = %s FOR UPDATE OF document
+                """,
+                (document_id,),
+            ).fetchone()
+            if document is None:
+                raise NotFoundOrForbidden("Document 不存在或无权访问")
+            self._require_permission(access_scope, document["namespace"], "delete")
+            receipt = connection.execute(
+                """
+                SELECT request_fingerprint FROM operation_receipt
+                WHERE namespace_id = %s AND operation = 'delete' AND idempotency_key = %s
+                FOR UPDATE
+                """,
+                (document["namespace_id"], idempotency_key),
+            ).fetchone()
+            if receipt is not None:
+                if receipt["request_fingerprint"] != fingerprint:
+                    raise IdempotencyConflict("同一幂等键对应了不同的删除请求")
+                return
+            connection.execute(
+                """
+                UPDATE document
+                SET withdrawn = true, deleted_at = now(), state_generation = state_generation + 1,
+                    updated_at = now()
+                WHERE id = %s
+                """,
+                (document_id,),
+            )
+            connection.execute(
+                """
+                INSERT INTO operation_receipt (
+                    id, namespace_id, operation, idempotency_key,
+                    request_fingerprint, status, result_ref, completed_at
+                ) VALUES (%s, %s, 'delete', %s, %s, 'succeeded', %s, now())
+                """,
+                (uuid4(), document["namespace_id"], idempotency_key, fingerprint, Jsonb({"document_id": document_id})),
+            )
+            connection.execute(
+                """
+                INSERT INTO audit_event (
+                    id, actor, object_type, object_id, before_state, after_state, trace_id
+                ) VALUES (%s, %s, 'document', %s, %s, %s, %s)
+                """,
+                (
+                    uuid4(), access_scope.principal_id, document_id,
+                    Jsonb({"deleted_at": None, "state_generation": document["state_generation"]}),
+                    Jsonb({"deleted": True, "state_generation": document["state_generation"] + 1}), str(uuid4()),
+                ),
+            )
 
     def retrieve(
         self,

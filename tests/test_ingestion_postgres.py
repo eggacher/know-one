@@ -568,3 +568,30 @@ def test_set_access_replaces_document_acl_for_subsequent_retrieval(
 
     assert not kb.retrieve("保养周期为", namespace, editor, at=datetime(2026, 9, 2, tzinfo=UTC)).evidence
     assert kb.retrieve("保养周期为", namespace, reader, at=datetime(2026, 9, 2, tzinfo=UTC)).evidence
+
+
+def test_delete_marks_document_unretrievable_without_removing_audit_state(
+    dsn: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """删除先切断检索可见性，并保留可审计的逻辑删除标记。"""
+    namespace = f"test-{uuid4()}"
+    create_namespace(dsn, namespace)
+    scope = AccessScope("editor", frozenset({namespace}), frozenset({"ingest", "publish", "read", "delete"}))
+    kb = KnowOne(dsn)
+    monkeypatch.setattr("know_one.core.api.OpenAIEmbeddingClient.embed", lambda _client, texts: [[0.01] * 1024 for _ in texts])
+    ref = kb.ingest(TextSource("保养周期为 5000 公里。"), namespace, "manual", scope, "ingest")
+    kb.process_job(ref.job_id)
+    revision_id = kb.get_ingestion(ref.job_id, scope).revision_id
+    assert revision_id is not None
+    kb.publish(revision_id, namespace, datetime(2026, 9, 1, tzinfo=UTC), None, 0, scope, "publish")
+    with psycopg.connect(dsn) as connection:
+        document_id = connection.execute("SELECT id FROM document WHERE namespace_id = (SELECT id FROM namespace WHERE name = %s)", (namespace,)).fetchone()[0]
+
+    kb.delete(str(document_id), scope, "delete")
+    kb.delete(str(document_id), scope, "delete")
+
+    assert not kb.retrieve("保养周期为", namespace, scope, at=datetime(2026, 9, 2, tzinfo=UTC)).evidence
+    with psycopg.connect(dsn) as connection:
+        deleted_at, withdrawn = connection.execute("SELECT deleted_at, withdrawn FROM document WHERE id = %s", (document_id,)).fetchone()
+    assert deleted_at is not None
+    assert withdrawn is True
