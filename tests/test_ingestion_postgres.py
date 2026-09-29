@@ -458,3 +458,39 @@ def test_retrieve_rrf_prioritizes_a_chunk_returned_by_both_paths(
     assert [evidence.text for evidence in result.evidence] == ["关键词命中。", "语义候选。"]
     assert result.evidence[0].score_type == "rrf"
     assert result.evidence[0].rank_score > result.evidence[1].rank_score
+
+
+def test_retrieve_filters_by_document_applicability(dsn: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    """文档声明适用条件时，请求必须提供匹配条件才能读取。"""
+    namespace = f"test-{uuid4()}"
+    create_namespace(dsn, namespace)
+    scope = AccessScope("reader", frozenset({namespace}), frozenset({"ingest", "publish", "read"}))
+    kb = KnowOne(dsn)
+    monkeypatch.setattr(
+        "know_one.core.api.OpenAIEmbeddingClient.embed",
+        lambda _client, texts: [[0.01] * 1024 for _ in texts],
+    )
+    ref = kb.ingest(TextSource("车型保养周期为 5000 公里。"), namespace, "manual", scope, "ingest")
+    kb.process_job(ref.job_id)
+    revision_id = kb.get_ingestion(ref.job_id, scope).revision_id
+    assert revision_id is not None
+    kb.publish(
+        revision_id, namespace, datetime(2026, 9, 1, tzinfo=UTC), None, 0, scope, "publish"
+    )
+    with psycopg.connect(dsn) as connection, connection.transaction():
+        connection.execute(
+            "UPDATE document SET applicability = '{\"model\": \"hybrid\"}'::jsonb "
+            "WHERE namespace_id = (SELECT id FROM namespace WHERE name = %s)",
+            (namespace,),
+        )
+
+    with pytest.raises(InvalidArgument, match="applicability"):
+        kb.retrieve("车型保养周期为", namespace, scope, at=datetime(2026, 9, 2, tzinfo=UTC))
+    assert kb.retrieve(
+        "车型保养周期为", namespace, scope, at=datetime(2026, 9, 2, tzinfo=UTC),
+        applicability={"model": "hybrid"},
+    ).evidence
+    assert not kb.retrieve(
+        "车型保养周期为", namespace, scope, at=datetime(2026, 9, 2, tzinfo=UTC),
+        applicability={"model": "gas"},
+    ).evidence

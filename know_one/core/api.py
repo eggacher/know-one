@@ -1130,8 +1130,9 @@ class KnowOne:
         _validate_timezone(at, field_name="at")
         if at > datetime.now(at.tzinfo):
             raise InvalidArgument("at 不能晚于当前时刻")
-        if applicability:
-            raise InvalidArgument("M2 全文检索暂不支持 applicability 条件")
+        applicability = applicability or {}
+        if not isinstance(applicability, dict):
+            raise InvalidArgument("applicability 必须是字典")
 
         with self._connect() as connection:
             active = connection.execute(
@@ -1147,6 +1148,18 @@ class KnowOne:
             ).fetchone()
         if active is None:
             raise NotFoundOrForbidden("Namespace 不存在或无权访问")
+        if not applicability:
+            with self._connect() as connection:
+                requires_applicability = connection.execute(
+                    """
+                    SELECT 1 FROM document
+                    WHERE namespace_id = %s AND applicability <> '{}'::jsonb
+                    LIMIT 1
+                    """,
+                    (active["id"],),
+                ).fetchone()
+            if requires_applicability is not None:
+                raise InvalidArgument("存在声明 applicability 的 Document，请求必须提供条件")
         vector_rows = []
         try:
             # 模型调用位于数据库连接的事务之外，避免网络延迟持有数据库锁。
@@ -1185,6 +1198,7 @@ class KnowOne:
                   AND build.status = 'ready'
                   AND document.withdrawn = false AND document.deleted_at IS NULL
                   AND document.acl @> jsonb_build_object('principals', jsonb_build_array(%s::text))
+                  AND document.applicability <@ %s::jsonb
                   AND publication.valid_from <= %s
                   AND (publication.valid_until IS NULL OR %s < publication.valid_until)
                   AND chunk.tsv @@ plainto_tsquery('simple', %s)
@@ -1193,7 +1207,7 @@ class KnowOne:
                 """,
                 (
                     namespace_row["id"], namespace_row["current_index_generation_id"],
-                    access_scope.principal_id, at, at, query, query, top_k,
+                    access_scope.principal_id, Jsonb(applicability), at, at, query, query, top_k,
                 ),
             ).fetchall()
             if query_vector is not None:
@@ -1216,6 +1230,7 @@ class KnowOne:
                       AND build.status = 'ready'
                       AND document.withdrawn = false AND document.deleted_at IS NULL
                       AND document.acl @> jsonb_build_object('principals', jsonb_build_array(%s::text))
+                      AND document.applicability <@ %s::jsonb
                       AND publication.valid_from <= %s
                       AND (publication.valid_until IS NULL OR %s < publication.valid_until)
                     ORDER BY chunk.embedding <=> CAST(%s AS vector), chunk.ordinal
@@ -1223,7 +1238,7 @@ class KnowOne:
                     """,
                     (
                         namespace_row["id"], namespace_row["current_index_generation_id"],
-                        access_scope.principal_id, at, at, vector_literal, top_k,
+                        access_scope.principal_id, Jsonb(applicability), at, at, vector_literal, top_k,
                     ),
                 ).fetchall()
         fused: dict[object, tuple[dict, float]] = {}
