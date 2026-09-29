@@ -295,3 +295,39 @@ def test_publish_rejects_incomplete_build_stale_state_and_conflicting_replay(
             scope,
             "publish-request",
         )
+
+
+def test_retrieve_returns_published_chunk_from_active_generation(
+    dsn: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """全文首切片只返回当前代中已发布且有权限读取的原文 Chunk。"""
+    namespace = f"test-{uuid4()}"
+    generation_id = create_namespace(dsn, namespace)
+    scope = AccessScope(
+        "reader", frozenset({namespace}), frozenset({"ingest", "publish", "read"})
+    )
+    kb = KnowOne(dsn)
+    monkeypatch.setattr(
+        "know_one.core.api.OpenAIEmbeddingClient.embed",
+        lambda _client, texts: [[0.01] * 1024 for _ in texts],
+    )
+    ref = kb.ingest(TextSource("保养周期为 5000 公里。"), namespace, "manual", scope, "ingest")
+    kb.process_job(ref.job_id)
+    revision_id = kb.get_ingestion(ref.job_id, scope).revision_id
+    assert revision_id is not None
+    kb.publish(
+        revision_id,
+        namespace,
+        datetime(2026, 9, 1, tzinfo=UTC),
+        None,
+        0,
+        scope,
+        "publish",
+    )
+
+    result = kb.retrieve("保养周期为", namespace, scope, at=datetime(2026, 9, 2, tzinfo=UTC))
+
+    assert result.index_generation == generation_id
+    assert len(result.evidence) == 1
+    assert result.evidence[0].text == "保养周期为 5000 公里。"
+    assert result.evidence[0].source_locator == {"char_start": 0, "char_end": 14}

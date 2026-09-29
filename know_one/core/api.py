@@ -19,7 +19,7 @@ publish / withdraw / set_access / delete / retrieve 为已定义契约的占位�
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 from hashlib import sha256
 import json
 import os
@@ -43,8 +43,10 @@ from know_one.errors import (
 )
 from know_one.model import (
     AccessScope,
+    Evidence,
     IngestionJobRef,
     IngestionStatus,
+    RetrievalResult,
     Source,
 )
 
@@ -1090,7 +1092,7 @@ class KnowOne:
         applicability: dict | None = None,
         top_k: int = 8,
         deadline_ms: int = 3000,
-    ):
+    ) -> RetrievalResult:
         """受约束的混合检索，返回可引用的 Evidence 列表。
 
         语义（contracts「retrieve 与 Evidence」；M2 实现）：
@@ -1116,7 +1118,72 @@ class KnowOne:
             top_k: 最多返回条数（建议 1–20，上限为部署配置）；不保证凑满。
             deadline_ms: 本次检索总预算（毫秒）；耗尽抛 DeadlineExceeded。
         """
-        raise NotImplementedError
+        self._require_permission(access_scope, namespace, "read")
+        if not query.strip():
+            raise InvalidArgument("query 不能为空")
+        if not 1 <= top_k <= 20:
+            raise InvalidArgument("top_k 必须在 1 到 20 之间")
+        if deadline_ms <= 0:
+            raise InvalidArgument("deadline_ms 必须大于 0")
+        at = at or datetime.now(UTC)
+        _validate_timezone(at, field_name="at")
+        if at > datetime.now(at.tzinfo):
+            raise InvalidArgument("at 不能晚于当前时刻")
+        if applicability:
+            raise InvalidArgument("M2 全文检索暂不支持 applicability 条件")
+
+        with self._connect() as connection:
+            namespace_row = connection.execute(
+                """SELECT id, current_index_generation_id FROM namespace WHERE name = %s""",
+                (namespace,),
+            ).fetchone()
+            if namespace_row is None or namespace_row["current_index_generation_id"] is None:
+                raise NotFoundOrForbidden("Namespace 不存在或无权访问")
+            generation = connection.execute(
+                """SELECT embedding_model FROM index_generation WHERE id = %s""",
+                (namespace_row["current_index_generation_id"],),
+            ).fetchone()
+            rows = connection.execute(
+                """
+                SELECT chunk.id AS chunk_id, chunk.raw_text, chunk.source_locator,
+                       chunk.heading_path, revision.id AS revision_id, document.id AS document_id,
+                       publication.valid_from, publication.valid_until
+                FROM chunk
+                JOIN revision_index_build AS build
+                  ON build.revision_id = chunk.revision_id
+                 AND build.index_generation_id = chunk.index_generation_id
+                JOIN document_revision AS revision ON revision.id = chunk.revision_id
+                JOIN document ON document.id = revision.document_id
+                JOIN publication ON publication.revision_id = revision.id
+                                 AND publication.document_id = document.id
+                WHERE chunk.namespace_id = %s
+                  AND chunk.index_generation_id = %s
+                  AND build.status = 'ready'
+                  AND document.withdrawn = false AND document.deleted_at IS NULL
+                  AND document.acl @> jsonb_build_object('principals', jsonb_build_array(%s::text))
+                  AND publication.valid_from <= %s
+                  AND (publication.valid_until IS NULL OR %s < publication.valid_until)
+                  AND chunk.tsv @@ plainto_tsquery('simple', %s)
+                ORDER BY ts_rank_cd(chunk.tsv, plainto_tsquery('simple', %s)) DESC, chunk.ordinal
+                LIMIT %s
+                """,
+                (
+                    namespace_row["id"], namespace_row["current_index_generation_id"],
+                    access_scope.principal_id, at, at, query, query, top_k,
+                ),
+            ).fetchall()
+        return RetrievalResult(
+            evidence=tuple(
+                Evidence(
+                    text=row["raw_text"], document_id=str(row["document_id"]),
+                    revision_id=str(row["revision_id"]), chunk_id=str(row["chunk_id"]),
+                    source_locator=row["source_locator"], heading_path=tuple(row["heading_path"]),
+                    publication_valid_from=row["valid_from"], publication_valid_until=row["valid_until"],
+                ) for row in rows
+            ),
+            index_generation=str(namespace_row["current_index_generation_id"]),
+            model_version=generation["embedding_model"], trace_id=str(uuid4()),
+        )
 
 
 def _validate_timezone(dt: datetime, *, field_name: str) -> None:

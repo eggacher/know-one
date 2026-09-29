@@ -18,8 +18,10 @@ from know_one.errors import (
 )
 from know_one.model import (
     AccessScope,
+    Evidence,
     IngestionJobRef,
     IngestionStatus,
+    RetrievalResult,
     Source,
 )
 
@@ -28,6 +30,7 @@ __all__ = [
     "AccessDenied",
     "ConcurrentModification",
     "DeadlineExceeded",
+    "Evidence",
     "DependencyUnavailable",
     "IdempotencyConflict",
     "IngestionFailed",
@@ -40,6 +43,7 @@ __all__ = [
     "NotFoundOrForbidden",
     "PublicationConflict",
     "RateLimited",
+    "RetrievalResult",
     "Source",
     "UnsupportedSource",
 ]

@@ -91,6 +91,32 @@ class IngestionStatus:
     """可预览来源（同样需要鉴权后访问）。"""
 
 
+@dataclass(frozen=True)
+class Evidence:
+    """检索命中的可引用原文及其不可变定位。"""
+
+    text: str
+    document_id: str
+    revision_id: str
+    chunk_id: str
+    source_locator: dict
+    publication_valid_from: datetime
+    publication_valid_until: datetime | None
+    heading_path: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class RetrievalResult:
+    """一次受约束检索的结果；空 evidence 不表示知识库不存在答案。"""
+
+    evidence: tuple[Evidence, ...]
+    index_generation: str
+    model_version: str
+    trace_id: str
+    degraded: bool = False
+    warnings: tuple[str, ...] = ()
+
+
 class Source(Protocol):
     """入库来源协议（contracts：source 必须能被 worker 持久读取）。
 
