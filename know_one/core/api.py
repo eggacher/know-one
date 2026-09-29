@@ -21,6 +21,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from hashlib import sha256
+import json
 import os
 import re
 from uuid import uuid4
@@ -33,9 +34,11 @@ from know_one.config import load_local_env
 from know_one.embedding import OpenAIEmbeddingClient
 from know_one.errors import (
     AccessDenied,
+    ConcurrentModification,
     IdempotencyConflict,
     InvalidArgument,
     NotFoundOrForbidden,
+    PublicationConflict,
     UnsupportedSource,
 )
 from know_one.model import (
@@ -289,6 +292,266 @@ class KnowOne:
             revision_id=(str(row["result_revision_id"]) if row["result_revision_id"] else None),
         )
 
+    def create_index_generation(self, namespace: str) -> str:
+        """创建使用当前运行时配置的 building IndexGeneration。
+
+        此接口供受控的本地管理入口调用。配置一经写入 generation 即不可
+        覆盖；与当前 active generation 配置相同的请求明确失败，避免产生
+        无意义的代次并掩盖本应执行的重建流程。
+        """
+        if not namespace.strip():
+            raise InvalidArgument("namespace 不能为空")
+        if not self._embedding_model:
+            raise InvalidArgument("创建 IndexGeneration 需要 embedding 模型配置")
+
+        config = {
+            "chunker": "m1-paragraph-v1",
+            "embedding_model": self._embedding_model,
+            "dimensions": self._embedding_dimensions,
+            "full_text": "postgres-simple-v1",
+        }
+        fingerprint = sha256(json.dumps(config, sort_keys=True).encode("utf-8")).hexdigest()
+        generation_id = uuid4()
+        with self._connect() as connection, connection.transaction():
+            namespace_row = connection.execute(
+                """
+                SELECT namespace.id, generation.config_fingerprint
+                FROM namespace
+                LEFT JOIN index_generation AS generation
+                  ON generation.id = namespace.current_index_generation_id
+                WHERE namespace.name = %s
+                FOR UPDATE OF namespace
+                """,
+                (namespace,),
+            ).fetchone()
+            if namespace_row is None:
+                raise NotFoundOrForbidden("Namespace 不存在或无权访问")
+            if namespace_row["config_fingerprint"] == fingerprint:
+                raise InvalidArgument("新 IndexGeneration 的配置必须与当前代不同")
+            connection.execute(
+                """
+                INSERT INTO index_generation (
+                    id, namespace_id, config_fingerprint, embedding_model,
+                    tokenizer_version, dims, distance, status
+                ) VALUES (%s, %s, %s, %s, %s, %s, 'cosine', 'building')
+                """,
+                (
+                    generation_id,
+                    namespace_row["id"],
+                    fingerprint,
+                    self._embedding_model,
+                    self._embedding_model,
+                    self._embedding_dimensions,
+                ),
+            )
+        return str(generation_id)
+
+    def rebuild_index_generation(self, namespace: str, generation_id: str) -> None:
+        """为 building IndexGeneration 重建该 Namespace 的全部 Revision。
+
+        M1 的 Revision 原文由成功入库任务持久保存。每个 Revision 的 embedding
+        在事务外生成，随后在短事务中替换该 generation 的草稿 Chunk 并完成
+        ``revision_index_build``，因此失败不会影响任何 active generation。
+        """
+        if not namespace.strip() or not generation_id.strip():
+            raise InvalidArgument("namespace 和 generation_id 均不能为空")
+        with self._connect() as connection:
+            generation = connection.execute(
+                """
+                SELECT generation.id, generation.namespace_id, generation.status,
+                       generation.embedding_model, generation.dims
+                FROM index_generation AS generation
+                JOIN namespace ON namespace.id = generation.namespace_id
+                WHERE namespace.name = %s AND generation.id = %s
+                """,
+                (namespace, generation_id),
+            ).fetchone()
+            if generation is None:
+                raise NotFoundOrForbidden("IndexGeneration 不存在或不属于该 Namespace")
+            if generation["status"] != "building":
+                raise InvalidArgument("只有 building IndexGeneration 可以重建")
+            if (
+                generation["embedding_model"] != self._embedding_model
+                or generation["dims"] != self._embedding_dimensions
+            ):
+                raise InvalidArgument("目标 IndexGeneration 与本地 embedding 配置不一致")
+            revisions = connection.execute(
+                """
+                SELECT revision.id, source.source_bytes
+                FROM document_revision AS revision
+                JOIN document ON document.id = revision.document_id
+                JOIN LATERAL (
+                    SELECT source_bytes
+                    FROM ingestion_job
+                    WHERE result_revision_id = revision.id
+                    ORDER BY created_at
+                    LIMIT 1
+                ) AS source ON true
+                WHERE document.namespace_id = %s
+                ORDER BY revision.created_at
+                """,
+                (generation["namespace_id"],),
+            ).fetchall()
+
+        for revision in revisions:
+            text = bytes(revision["source_bytes"]).decode("utf-8")
+            paragraphs = self._paragraphs(text)
+            if not paragraphs:
+                raise InvalidArgument("Revision 原文中没有可切分的文本段落")
+            # 外部网络调用绝不放入数据库事务，避免长时间持锁。
+            vectors = OpenAIEmbeddingClient(
+                self._embedding_endpoint, self._embedding_model, self._embedding_dimensions
+            ).embed([raw_text for raw_text, _, _ in paragraphs])
+            self._write_rebuilt_revision(
+                generation["namespace_id"], generation_id, revision["id"], paragraphs, vectors
+            )
+
+    def _write_rebuilt_revision(
+        self,
+        namespace_id: object,
+        generation_id: str,
+        revision_id: object,
+        paragraphs: list[tuple[str, int, int]],
+        vectors: list[list[float]],
+    ) -> None:
+        """在短事务中覆盖一个 Revision 在 building generation 中的草稿。"""
+        with self._connect() as connection, connection.transaction():
+            generation = connection.execute(
+                """
+                SELECT status FROM index_generation
+                WHERE id = %s AND namespace_id = %s
+                FOR UPDATE
+                """,
+                (generation_id, namespace_id),
+            ).fetchone()
+            if generation is None or generation["status"] != "building":
+                raise InvalidArgument("目标 IndexGeneration 已不处于 building 状态")
+            build = connection.execute(
+                """
+                SELECT status FROM revision_index_build
+                WHERE revision_id = %s AND index_generation_id = %s
+                FOR UPDATE
+                """,
+                (revision_id, generation_id),
+            ).fetchone()
+            if build and build["status"] == "ready":
+                return
+            if build:
+                # 重试从干净草稿开始，避免旧的半成品混入本次完整性校验。
+                connection.execute(
+                    "DELETE FROM chunk WHERE revision_id = %s AND index_generation_id = %s",
+                    (revision_id, generation_id),
+                )
+                connection.execute(
+                    """
+                    UPDATE revision_index_build
+                    SET status = 'building', expected_chunk_count = NULL,
+                        completed_chunk_count = 0, error_code = NULL, completed_at = NULL
+                    WHERE revision_id = %s AND index_generation_id = %s
+                    """,
+                    (revision_id, generation_id),
+                )
+            else:
+                connection.execute(
+                    """
+                    INSERT INTO revision_index_build (revision_id, index_generation_id, status)
+                    VALUES (%s, %s, 'building')
+                    """,
+                    (revision_id, generation_id),
+                )
+            for ordinal, ((raw_text, start, end), vector) in enumerate(
+                zip(paragraphs, vectors, strict=True)
+            ):
+                connection.execute(
+                    """
+                    INSERT INTO chunk (
+                        id, namespace_id, revision_id, index_generation_id, ordinal,
+                        raw_text, search_text, source_locator, embedding, tsv
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s,
+                              CAST(%s AS vector), to_tsvector('simple', %s))
+                    """,
+                    (
+                        uuid4(), namespace_id, revision_id, generation_id, ordinal,
+                        raw_text, raw_text,
+                        Jsonb({"char_start": start, "char_end": end}),
+                        "[" + ",".join(str(value) for value in vector) + "]", raw_text,
+                    ),
+                )
+            connection.execute(
+                """
+                UPDATE revision_index_build
+                SET status = 'ready', expected_chunk_count = %s,
+                    completed_chunk_count = %s, completed_at = now()
+                WHERE revision_id = %s AND index_generation_id = %s
+                """,
+                (len(paragraphs), len(paragraphs), revision_id, generation_id),
+            )
+
+    def activate_index_generation(self, namespace: str, generation_id: str) -> None:
+        """原子切换已完成重建的 IndexGeneration。
+
+        激活前以 Namespace 锁固定校验范围：该 Namespace 的每个 Revision
+        都必须在目标代有完整 ready 构建。切换时同时更新当前指针和新旧代
+        状态，因此后续入库会读取新 active generation，不会继续写入旧代。
+        """
+        if not namespace.strip() or not generation_id.strip():
+            raise InvalidArgument("namespace 和 generation_id 均不能为空")
+        with self._connect() as connection, connection.transaction():
+            namespace_row = connection.execute(
+                """
+                SELECT id, current_index_generation_id
+                FROM namespace WHERE name = %s
+                FOR UPDATE
+                """,
+                (namespace,),
+            ).fetchone()
+            if namespace_row is None:
+                raise NotFoundOrForbidden("Namespace 不存在或无权访问")
+            generation = connection.execute(
+                """
+                SELECT id, status FROM index_generation
+                WHERE id = %s AND namespace_id = %s
+                FOR UPDATE
+                """,
+                (generation_id, namespace_row["id"]),
+            ).fetchone()
+            if generation is None:
+                raise NotFoundOrForbidden("IndexGeneration 不存在或不属于该 Namespace")
+            if generation["status"] != "building":
+                raise InvalidArgument("只有 building IndexGeneration 可以激活")
+            missing = connection.execute(
+                """
+                SELECT revision.id
+                FROM document_revision AS revision
+                JOIN document ON document.id = revision.document_id
+                WHERE document.namespace_id = %s
+                  AND NOT EXISTS (
+                      SELECT 1 FROM revision_index_build AS build
+                      WHERE build.revision_id = revision.id
+                        AND build.index_generation_id = %s
+                        AND build.status = 'ready'
+                  )
+                LIMIT 1
+                """,
+                (namespace_row["id"], generation_id),
+            ).fetchone()
+            if missing is not None:
+                raise InvalidArgument("IndexGeneration 尚未完成全部 Revision 的重建")
+
+            # 指针与状态在同一短事务提交，读者不会观察到半完成的切换。
+            connection.execute(
+                "UPDATE index_generation SET status = 'retired' WHERE id = %s",
+                (namespace_row["current_index_generation_id"],),
+            )
+            connection.execute(
+                "UPDATE index_generation SET status = 'active' WHERE id = %s",
+                (generation_id,),
+            )
+            connection.execute(
+                "UPDATE namespace SET current_index_generation_id = %s WHERE id = %s",
+                (generation_id, namespace_row["id"]),
+            )
+
     def process_job(self, job_id: str, *, lease_seconds: int = 300) -> None:
         """worker 执行入口：领取并处理一个任务（实现层方法，不属于对外契约）。
 
@@ -454,6 +717,29 @@ class KnowOne:
         ).embed([raw_text for raw_text, _, _ in paragraphs])
 
         with self._connect() as connection, connection.transaction():
+            current_generation = connection.execute(
+                """
+                SELECT current_index_generation_id FROM namespace
+                WHERE id = %s
+                FOR UPDATE
+                """,
+                (job["namespace_id"],),
+            ).fetchone()
+            if current_generation is None:
+                raise InvalidArgument("任务所属 Namespace 不存在")
+            if current_generation["current_index_generation_id"] != job["current_index_generation_id"]:
+                # 切换已先提交时，丢弃旧配置生成的向量并交由 worker 按新代重试。
+                # 这条复核保证旧代在激活后不会再接收迟到的 Chunk 写入。
+                connection.execute(
+                    """
+                    UPDATE ingestion_job
+                    SET status = 'queued', stage = NULL, lease_expires_at = NULL,
+                        updated_at = now()
+                    WHERE id = %s
+                    """,
+                    (job_id,),
+                )
+                return
             document = connection.execute(
                 """
                 SELECT id FROM document
@@ -616,7 +902,152 @@ class KnowOne:
             access_scope: 需含 (namespace, "publish") 权限。
             idempotency_key: 幂等键，(namespace, "publish", key) 内唯一。
         """
-        raise NotImplementedError
+        self._require_permission(access_scope, namespace, "publish")
+        if not revision_id.strip() or not namespace.strip() or not idempotency_key.strip():
+            raise InvalidArgument("revision_id、namespace 和 idempotency_key 均不能为空")
+        if expected_generation < 0:
+            raise InvalidArgument("expected_generation 不能为负数")
+        _validate_timezone(valid_from, field_name="valid_from")
+        if valid_until is not None:
+            _validate_timezone(valid_until, field_name="valid_until")
+            if valid_from >= valid_until:
+                raise InvalidArgument("valid_from 必须早于 valid_until")
+
+        fingerprint = sha256(
+            json.dumps(
+                {
+                    "revision_id": revision_id,
+                    "valid_from": valid_from.isoformat(),
+                    "valid_until": valid_until.isoformat() if valid_until else None,
+                    "expected_generation": expected_generation,
+                },
+                sort_keys=True,
+            ).encode("utf-8")
+        ).hexdigest()
+        with self._connect() as connection, connection.transaction():
+            namespace_row = connection.execute(
+                """
+                SELECT id, current_index_generation_id
+                FROM namespace WHERE name = %s
+                FOR UPDATE
+                """,
+                (namespace,),
+            ).fetchone()
+            if namespace_row is None:
+                raise NotFoundOrForbidden("Namespace 不存在或无权访问")
+            receipt = connection.execute(
+                """
+                SELECT request_fingerprint FROM operation_receipt
+                WHERE namespace_id = %s AND operation = 'publish' AND idempotency_key = %s
+                FOR UPDATE
+                """,
+                (namespace_row["id"], idempotency_key),
+            ).fetchone()
+            if receipt is not None:
+                if receipt["request_fingerprint"] != fingerprint:
+                    raise IdempotencyConflict("同一幂等键对应了不同的发布请求")
+                return
+
+            revision = connection.execute(
+                """
+                SELECT revision.id, document.id AS document_id, document.state_generation
+                FROM document_revision AS revision
+                JOIN document ON document.id = revision.document_id
+                WHERE revision.id = %s AND document.namespace_id = %s
+                FOR UPDATE OF document
+                """,
+                (revision_id, namespace_row["id"]),
+            ).fetchone()
+            if revision is None:
+                raise NotFoundOrForbidden("Revision 不存在或不属于该 Namespace")
+            if revision["state_generation"] != expected_generation:
+                raise ConcurrentModification("Document 的 state_generation 已变化")
+            build = connection.execute(
+                """
+                SELECT status FROM revision_index_build
+                WHERE revision_id = %s AND index_generation_id = %s
+                """,
+                (revision_id, namespace_row["current_index_generation_id"]),
+            ).fetchone()
+            if build is None or build["status"] != "ready":
+                raise InvalidArgument("Revision 尚未在当前 IndexGeneration 完成构建")
+
+            existing = connection.execute(
+                """
+                SELECT id, valid_from FROM publication
+                WHERE document_id = %s AND valid_until IS NULL
+                FOR UPDATE
+                """,
+                (revision["document_id"],),
+            ).fetchone()
+            if existing is not None:
+                if valid_from <= existing["valid_from"]:
+                    raise PublicationConflict("新发布窗口必须晚于当前无上界窗口")
+                connection.execute(
+                    "UPDATE publication SET valid_until = %s WHERE id = %s",
+                    (valid_from, existing["id"]),
+                )
+            else:
+                prior = connection.execute(
+                    "SELECT 1 FROM publication WHERE document_id = %s LIMIT 1",
+                    (revision["document_id"],),
+                ).fetchone()
+                if prior is not None:
+                    raise PublicationConflict("已有封闭发布窗口，不能乱序回填")
+
+            publication_id = uuid4()
+            connection.execute(
+                """
+                INSERT INTO publication (
+                    id, document_id, revision_id, valid_from, valid_until, published_by
+                ) VALUES (%s, %s, %s, %s, %s, %s)
+                """,
+                (
+                    publication_id,
+                    revision["document_id"],
+                    revision_id,
+                    valid_from,
+                    valid_until,
+                    access_scope.principal_id,
+                ),
+            )
+            connection.execute(
+                """
+                UPDATE document SET state_generation = state_generation + 1, updated_at = now()
+                WHERE id = %s
+                """,
+                (revision["document_id"],),
+            )
+            connection.execute(
+                """
+                INSERT INTO operation_receipt (
+                    id, namespace_id, operation, idempotency_key,
+                    request_fingerprint, status, result_ref, completed_at
+                ) VALUES (%s, %s, 'publish', %s, %s, 'succeeded', %s, now())
+                """,
+                (
+                    uuid4(),
+                    namespace_row["id"],
+                    idempotency_key,
+                    fingerprint,
+                    Jsonb({"publication_id": str(publication_id)}),
+                ),
+            )
+            connection.execute(
+                """
+                INSERT INTO audit_event (
+                    id, actor, object_type, object_id, before_state, after_state, trace_id
+                ) VALUES (%s, %s, 'publication', %s, %s, %s, %s)
+                """,
+                (
+                    uuid4(),
+                    access_scope.principal_id,
+                    str(publication_id),
+                    Jsonb({"state_generation": expected_generation}),
+                    Jsonb({"state_generation": expected_generation + 1}),
+                    str(uuid4()),
+                ),
+            )
 
     def withdraw(
         self,

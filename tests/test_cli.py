@@ -20,6 +20,19 @@ def test_help_lists_namespace_setup_command(capsys: pytest.CaptureFixture[str]) 
     assert "create-namespace" in capsys.readouterr().out
 
 
+def test_help_lists_index_generation_management_commands(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """本地运维可发现创建、重建和激活索引代的受控命令。"""
+    with pytest.raises(SystemExit):
+        main(["--help"])
+
+    output = capsys.readouterr().out
+    assert "create-index-generation" in output
+    assert "rebuild-index-generation" in output
+    assert "activate-index-generation" in output
+
+
 def test_init_db_requires_a_connection_string(
     capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch, tmp_path
 ) -> None:

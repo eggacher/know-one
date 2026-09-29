@@ -11,6 +11,8 @@ from typing import Sequence
 from uuid import uuid4
 
 from know_one.config import load_local_env
+from know_one.core.api import KnowOne
+from know_one.errors import KnowOneError
 
 def _schema_sql() -> str:
     """读取随 Python 包发布的初始 schema，避免依赖当前工作目录。"""
@@ -113,6 +115,35 @@ def _parser() -> argparse.ArgumentParser:
         default=os.environ.get("KNOWONE_DSN"),
         help="PostgreSQL 连接串；未提供时读取 KNOWONE_DSN",
     )
+    create_generation_parser = subcommands.add_parser(
+        "create-index-generation", help="按当前配置创建 building IndexGeneration"
+    )
+    create_generation_parser.add_argument("name", help="目标 Namespace 名称")
+    create_generation_parser.add_argument(
+        "--dsn",
+        default=os.environ.get("KNOWONE_DSN"),
+        help="PostgreSQL 连接串；未提供时读取 KNOWONE_DSN",
+    )
+    rebuild_generation_parser = subcommands.add_parser(
+        "rebuild-index-generation", help="为 building IndexGeneration 重建全部 Revision"
+    )
+    rebuild_generation_parser.add_argument("name", help="目标 Namespace 名称")
+    rebuild_generation_parser.add_argument("generation_id", help="building IndexGeneration ID")
+    rebuild_generation_parser.add_argument(
+        "--dsn",
+        default=os.environ.get("KNOWONE_DSN"),
+        help="PostgreSQL 连接串；未提供时读取 KNOWONE_DSN",
+    )
+    activate_generation_parser = subcommands.add_parser(
+        "activate-index-generation", help="原子切换已完整重建的 IndexGeneration"
+    )
+    activate_generation_parser.add_argument("name", help="目标 Namespace 名称")
+    activate_generation_parser.add_argument("generation_id", help="building IndexGeneration ID")
+    activate_generation_parser.add_argument(
+        "--dsn",
+        default=os.environ.get("KNOWONE_DSN"),
+        help="PostgreSQL 连接串；未提供时读取 KNOWONE_DSN",
+    )
     return parser
 
 
@@ -139,6 +170,36 @@ def main(argv: Sequence[str] | None = None) -> int:
         except (RuntimeError, ValueError) as error:
             parser.error(str(error))
         print(f"Namespace {arguments.name} 已就绪，IndexGeneration={generation_id}")
+        return 0
+
+    if arguments.command == "create-index-generation":
+        if not arguments.dsn:
+            parser.error("create-index-generation 需要 --dsn 或 KNOWONE_DSN")
+        try:
+            generation_id = KnowOne(arguments.dsn).create_index_generation(arguments.name)
+        except (RuntimeError, ValueError, KnowOneError) as error:
+            parser.error(str(error))
+        print(f"IndexGeneration 已创建：{generation_id}")
+        return 0
+
+    if arguments.command == "rebuild-index-generation":
+        if not arguments.dsn:
+            parser.error("rebuild-index-generation 需要 --dsn 或 KNOWONE_DSN")
+        try:
+            KnowOne(arguments.dsn).rebuild_index_generation(arguments.name, arguments.generation_id)
+        except (RuntimeError, ValueError, KnowOneError) as error:
+            parser.error(str(error))
+        print(f"IndexGeneration 已重建：{arguments.generation_id}")
+        return 0
+
+    if arguments.command == "activate-index-generation":
+        if not arguments.dsn:
+            parser.error("activate-index-generation 需要 --dsn 或 KNOWONE_DSN")
+        try:
+            KnowOne(arguments.dsn).activate_index_generation(arguments.name, arguments.generation_id)
+        except (RuntimeError, ValueError, KnowOneError) as error:
+            parser.error(str(error))
+        print(f"IndexGeneration 已激活：{arguments.generation_id}")
         return 0
 
     parser.error(f"未知命令：{arguments.command}")

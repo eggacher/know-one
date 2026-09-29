@@ -65,6 +65,16 @@ python -m know_one create-namespace game-a-cs
 
 `know_one/model/__init__.py` 定义公开数据类型，`know_one/core/api.py` 定义 `KnowOne` 业务门面；`python -m know_one --help` 可查看本地管理命令。复制 [`.env.example`](.env.example) 为 `.env` 后可统一设置 `KNOWONE_DSN`、`KNOWONE_EMBEDDING_ENDPOINT`、`KNOWONE_EMBEDDING_MODEL` 和 `KNOWONE_EMBEDDING_DIMENSIONS`。默认模型为 `Qwen/Qwen3-Embedding-0.6B`、1024 维；显式参数和进程环境变量优先于 `.env`。`create-namespace` 会将当前模型、维度和切块配置冻结到首个 active IndexGeneration。`init-db` 使用 `know_one/storage/schema.sql` 初始化空数据库，只应执行一次。已有旧 schema 的开发库需先人工审阅并执行 `know_one/storage/migrations/0001_persist_ingestion_source.sql`；该迁移拒绝为旧任务伪造来源快照。
 
+升级 embedding 或切块配置时，先将 `.env` 改为目标配置，再依次执行：
+
+```bash
+python -m know_one create-index-generation game-a-cs
+python -m know_one rebuild-index-generation game-a-cs <generation-id>
+python -m know_one activate-index-generation game-a-cs <generation-id>
+```
+
+重建在隔离的 building generation 中进行；最后一个命令仅在该 Namespace 的全部 Revision 都已完成构建时才会原子切换，新入库随后写入新代。
+
 ## 文档入口
 
 | 文档 | 负责回答的问题 |
