@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from datetime import datetime
 from hashlib import sha256
 import json
 import os
@@ -13,6 +14,25 @@ from uuid import uuid4
 from know_one.config import load_local_env
 from know_one.core.api import KnowOne
 from know_one.errors import KnowOneError
+from know_one.model import AccessScope, PERMISSIONS
+
+
+def _local_admin_scope(namespace: str, actor: str) -> AccessScope:
+    """构造仅供受控本地管理命令使用的固定管理员授权范围。"""
+    if not actor.strip():
+        raise ValueError("actor 不能为空")
+    return AccessScope(actor, frozenset({namespace}), PERMISSIONS)
+
+
+def _parse_timestamp(value: str) -> datetime:
+    """解析带时区的 ISO 8601 时间，拒绝 CLI 无法明确解释的本地时间。"""
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError("时间必须是 ISO 8601 格式") from error
+    if parsed.tzinfo is None:
+        raise argparse.ArgumentTypeError("时间必须携带时区")
+    return parsed
 
 def _schema_sql() -> str:
     """读取随 Python 包发布的初始 schema，避免依赖当前工作目录。"""
@@ -144,6 +164,31 @@ def _parser() -> argparse.ArgumentParser:
         default=os.environ.get("KNOWONE_DSN"),
         help="PostgreSQL 连接串；未提供时读取 KNOWONE_DSN",
     )
+    publish_parser = subcommands.add_parser("publish", help="以本地管理员身份发布 ready Revision")
+    publish_parser.add_argument("name", help="目标 Namespace 名称")
+    publish_parser.add_argument("revision_id")
+    publish_parser.add_argument("valid_from", type=_parse_timestamp)
+    publish_parser.add_argument("--valid-until", type=_parse_timestamp)
+    publish_parser.add_argument("--expected-generation", type=int, required=True)
+    publish_parser.add_argument("--idempotency-key", required=True)
+    withdraw_parser = subcommands.add_parser("withdraw", help="以本地管理员身份撤回 Document")
+    withdraw_parser.add_argument("name", help="目标 Namespace 名称")
+    withdraw_parser.add_argument("document_id")
+    withdraw_parser.add_argument("--expected-generation", type=int, required=True)
+    withdraw_parser.add_argument("--idempotency-key", required=True)
+    access_parser = subcommands.add_parser("set-access", help="以本地管理员身份替换 Document ACL")
+    access_parser.add_argument("name", help="目标 Namespace 名称")
+    access_parser.add_argument("document_id")
+    access_parser.add_argument("acl", help="ACL JSON，例如 {\"principals\":[\"operator\"]}")
+    access_parser.add_argument("--expected-generation", type=int, required=True)
+    access_parser.add_argument("--idempotency-key", required=True)
+    delete_parser = subcommands.add_parser("delete", help="以本地管理员身份立即删除 Document 内容")
+    delete_parser.add_argument("name", help="目标 Namespace 名称")
+    delete_parser.add_argument("document_id")
+    delete_parser.add_argument("--idempotency-key", required=True)
+    for command_parser in (publish_parser, withdraw_parser, access_parser, delete_parser):
+        command_parser.add_argument("--actor", default="local-admin", help="写入审计的本地操作者")
+        command_parser.add_argument("--dsn", default=os.environ.get("KNOWONE_DSN"))
     return parser
 
 
@@ -200,6 +245,52 @@ def main(argv: Sequence[str] | None = None) -> int:
         except (RuntimeError, ValueError, KnowOneError) as error:
             parser.error(str(error))
         print(f"IndexGeneration 已激活：{arguments.generation_id}")
+        return 0
+
+    if arguments.command in {"publish", "withdraw", "set-access", "delete"}:
+        if not arguments.dsn:
+            parser.error(f"{arguments.command} 需要 --dsn 或 KNOWONE_DSN")
+        try:
+            scope = _local_admin_scope(arguments.name, arguments.actor)
+            acl = None
+            if arguments.command == "set-access":
+                acl = json.loads(arguments.acl)
+                if not isinstance(acl, dict):
+                    raise ValueError("ACL 必须是 JSON 对象")
+            know_one = KnowOne(arguments.dsn)
+            if arguments.command == "publish":
+                know_one.publish(
+                    arguments.revision_id,
+                    arguments.name,
+                    arguments.valid_from,
+                    arguments.valid_until,
+                    arguments.expected_generation,
+                    scope,
+                    arguments.idempotency_key,
+                )
+                print(f"Revision 已发布：{arguments.revision_id}")
+            elif arguments.command == "withdraw":
+                know_one.withdraw(
+                    arguments.document_id,
+                    arguments.expected_generation,
+                    scope,
+                    arguments.idempotency_key,
+                )
+                print(f"Document 已撤回：{arguments.document_id}")
+            elif arguments.command == "set-access":
+                know_one.set_access(
+                    arguments.document_id,
+                    acl,
+                    arguments.expected_generation,
+                    scope,
+                    arguments.idempotency_key,
+                )
+                print(f"Document ACL 已更新：{arguments.document_id}")
+            else:
+                know_one.delete(arguments.document_id, scope, arguments.idempotency_key)
+                print(f"Document 内容已删除：{arguments.document_id}")
+        except (RuntimeError, ValueError, KnowOneError) as error:
+            parser.error(str(error))
         return 0
 
     parser.error(f"未知命令：{arguments.command}")

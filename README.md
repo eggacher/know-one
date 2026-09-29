@@ -2,7 +2,7 @@
 
 可嵌入 Python 业务系统的知识入库与检索库，首个落地场景是中文客服 FAQ 和公告。
 
-**当前状态：已具备首条可运行的纯文本入库链路：提交任务、持久化来源快照、按空行切块并构建 ready Revision。发布、检索、PDF/HTML/Markdown 解析、embedding 与重排仍未实现，也没有商用性能或质量验证。**
+**当前状态：已具备纯文本入库、IndexGeneration 重建切换、发布、受约束的全文/向量混合检索，以及 Document 撤回、ACL 更新和立即删除。PDF/HTML/Markdown 解析与重排尚未实现，也没有商用性能或质量验证。**
 
 ## 范围与职责
 
@@ -14,7 +14,7 @@ KnowOne 负责知识构建、版本发布、受约束的混合检索及证据返
 
 ## 目标接口
 
-`KnowOne` 可从根包导入。以下 `ingest → process_job → get_ingestion` 可在 M1 运行；发布和检索仍是后续接口。参数、错误和一致性以 [接口契约](docs/contracts.md) 为准。
+`KnowOne` 可从根包导入。以下入库、发布和检索流程均可运行；参数、错误和一致性以 [接口契约](docs/contracts.md) 为准。
 
 ```python
 # 调用方完成身份认证并计算可信 scope；客户端不能自行指定授权范围。
@@ -23,6 +23,7 @@ from know_one.ingestion import TextSource
 
 kb = KnowOne("postgresql://knowone:knowone@localhost:5432/knowone")
 editor_scope = AccessScope("editor-1", frozenset({"game-a-cs"}), frozenset({"ingest"}))
+publisher_scope = AccessScope("publisher-1", frozenset({"game-a-cs"}), frozenset({"publish"}))
 source = TextSource("问题：怎么找回密码？\n\n答案：请在登录页选择“忘记密码”。")
 job = kb.ingest(source, namespace="game-a-cs",
                 source_key="official/faq/password", access_scope=editor_scope,
@@ -33,7 +34,7 @@ status = kb.get_ingestion(job.job_id, access_scope=editor_scope)
 kb.publish(status.revision_id, namespace="game-a-cs",
            valid_from=effective_time, valid_until=None,
            expected_generation=state_generation,
-           access_scope=editor_scope, idempotency_key="publish-001")
+           access_scope=publisher_scope, idempotency_key="publish-001")
 
 result = kb.retrieve(query="怎么找回密码啊", namespace="game-a-cs",
                      access_scope=reader_scope, top_k=8)
@@ -74,6 +75,20 @@ python -m know_one activate-index-generation game-a-cs <generation-id>
 ```
 
 重建在隔离的 building generation 中进行；最后一个命令仅在该 Namespace 的全部 Revision 都已完成构建时才会原子切换，新入库随后写入新代。
+
+发布和生命周期变更也只通过受控的本地管理员进程执行；`--actor` 只记录审计操作者，不能自选权限。不要将这些命令直接暴露给浏览器或公共 HTTP 接口。
+
+```bash
+python -m know_one publish game-a-cs <revision-id> 2026-09-29T09:00:00+08:00 \
+  --expected-generation 0 --idempotency-key publish-001
+python -m know_one withdraw game-a-cs <document-id> \
+  --expected-generation 1 --idempotency-key withdraw-001
+python -m know_one set-access game-a-cs <document-id> '{"principals":["operator"]}' \
+  --expected-generation 2 --idempotency-key acl-001
+python -m know_one delete game-a-cs <document-id> --idempotency-key delete-001
+```
+
+`delete` 会立即清理该 Document 的正文、Revision、Chunk 和 Publication，并保留最小删除审计记录。
 
 ## 文档入口
 
