@@ -331,3 +331,73 @@ def test_retrieve_returns_published_chunk_from_active_generation(
     assert len(result.evidence) == 1
     assert result.evidence[0].text == "保养周期为 5000 公里。"
     assert result.evidence[0].source_locator == {"char_start": 0, "char_end": 14}
+
+
+def test_retrieve_excludes_acl_denied_withdrawn_and_outside_window_chunks(
+    dsn: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """读取约束任一不满足时，检索必须安全地返回空证据。"""
+    namespace = f"test-{uuid4()}"
+    create_namespace(dsn, namespace)
+    editor = AccessScope("editor", frozenset({namespace}), frozenset({"ingest", "publish", "read"}))
+    reader = AccessScope("reader", frozenset({namespace}), frozenset({"read"}))
+    kb = KnowOne(dsn)
+    monkeypatch.setattr(
+        "know_one.core.api.OpenAIEmbeddingClient.embed",
+        lambda _client, texts: [[0.01] * 1024 for _ in texts],
+    )
+    ref = kb.ingest(TextSource("保养周期为 5000 公里。"), namespace, "manual", editor, "ingest")
+    kb.process_job(ref.job_id)
+    revision_id = kb.get_ingestion(ref.job_id, editor).revision_id
+    assert revision_id is not None
+    valid_from = datetime(2026, 9, 1, tzinfo=UTC)
+    kb.publish(revision_id, namespace, valid_from, None, 0, editor, "publish")
+
+    assert not kb.retrieve("保养周期为", namespace, reader, at=datetime(2026, 9, 2, tzinfo=UTC)).evidence
+    with psycopg.connect(dsn) as connection, connection.transaction():
+        connection.execute(
+            "UPDATE document SET acl = '{\"principals\": [\"reader\"]}'::jsonb "
+            "WHERE namespace_id = (SELECT id FROM namespace WHERE name = %s)",
+            (namespace,),
+        )
+    assert kb.retrieve("保养周期为", namespace, reader, at=datetime(2026, 9, 2, tzinfo=UTC)).evidence
+    assert not kb.retrieve("保养周期为", namespace, reader, at=datetime(2026, 8, 31, tzinfo=UTC)).evidence
+    with psycopg.connect(dsn) as connection, connection.transaction():
+        connection.execute(
+            "UPDATE document SET withdrawn = true WHERE namespace_id = "
+            "(SELECT id FROM namespace WHERE name = %s)",
+            (namespace,),
+        )
+    assert not kb.retrieve("保养周期为", namespace, reader, at=datetime(2026, 9, 2, tzinfo=UTC)).evidence
+
+
+def test_retrieve_uses_only_the_active_index_generation(
+    dsn: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """切换索引代后，保留的旧代 Chunk 不能重新进入检索结果。"""
+    namespace = f"test-{uuid4()}"
+    create_namespace(dsn, namespace)
+    scope = AccessScope("reader", frozenset({namespace}), frozenset({"ingest", "publish", "read"}))
+    kb = KnowOne(dsn)
+    monkeypatch.setattr(
+        "know_one.core.api.OpenAIEmbeddingClient.embed",
+        lambda _client, texts: [[0.01] * 1024 for _ in texts],
+    )
+    ref = kb.ingest(TextSource("保养周期为 5000 公里。"), namespace, "manual", scope, "ingest")
+    kb.process_job(ref.job_id)
+    revision_id = kb.get_ingestion(ref.job_id, scope).revision_id
+    assert revision_id is not None
+    kb.publish(
+        revision_id, namespace, datetime(2026, 9, 1, tzinfo=UTC), None, 0, scope, "publish"
+    )
+
+    upgraded_kb = KnowOne(dsn, embedding_model="test-upgraded-model")
+    new_generation_id = upgraded_kb.create_index_generation(namespace)
+    upgraded_kb.rebuild_index_generation(namespace, new_generation_id)
+    upgraded_kb.activate_index_generation(namespace, new_generation_id)
+
+    result = upgraded_kb.retrieve(
+        "保养周期为", namespace, scope, at=datetime(2026, 9, 2, tzinfo=UTC)
+    )
+    assert result.index_generation == new_generation_id
+    assert len(result.evidence) == 1
