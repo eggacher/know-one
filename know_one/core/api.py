@@ -1067,7 +1067,77 @@ class KnowOne:
           撤回立即作用于所有 at；
         - 恢复必须是明确管理操作（再次发布或显式恢复）。
         """
-        raise NotImplementedError
+        if not document_id.strip() or not idempotency_key.strip():
+            raise InvalidArgument("document_id 和 idempotency_key 均不能为空")
+        if expected_generation < 0:
+            raise InvalidArgument("expected_generation 不能为负数")
+        fingerprint = sha256(
+            json.dumps(
+                {"document_id": document_id, "expected_generation": expected_generation},
+                sort_keys=True,
+            ).encode("utf-8")
+        ).hexdigest()
+        with self._connect() as connection, connection.transaction():
+            document = connection.execute(
+                """
+                SELECT document.id, document.state_generation, namespace.id AS namespace_id,
+                       namespace.name AS namespace
+                FROM document JOIN namespace ON namespace.id = document.namespace_id
+                WHERE document.id = %s
+                FOR UPDATE OF document
+                """,
+                (document_id,),
+            ).fetchone()
+            if document is None:
+                raise NotFoundOrForbidden("Document 不存在或无权访问")
+            self._require_permission(access_scope, document["namespace"], "withdraw")
+            receipt = connection.execute(
+                """
+                SELECT request_fingerprint FROM operation_receipt
+                WHERE namespace_id = %s AND operation = 'withdraw' AND idempotency_key = %s
+                FOR UPDATE
+                """,
+                (document["namespace_id"], idempotency_key),
+            ).fetchone()
+            if receipt is not None:
+                if receipt["request_fingerprint"] != fingerprint:
+                    raise IdempotencyConflict("同一幂等键对应了不同的撤回请求")
+                return
+            if document["state_generation"] != expected_generation:
+                raise ConcurrentModification("Document 的 state_generation 已变化")
+            connection.execute(
+                """
+                UPDATE document
+                SET withdrawn = true, state_generation = state_generation + 1, updated_at = now()
+                WHERE id = %s
+                """,
+                (document_id,),
+            )
+            connection.execute(
+                """
+                INSERT INTO operation_receipt (
+                    id, namespace_id, operation, idempotency_key,
+                    request_fingerprint, status, result_ref, completed_at
+                ) VALUES (%s, %s, 'withdraw', %s, %s, 'succeeded', %s, now())
+                """,
+                (
+                    uuid4(), document["namespace_id"], idempotency_key, fingerprint,
+                    Jsonb({"document_id": document_id}),
+                ),
+            )
+            connection.execute(
+                """
+                INSERT INTO audit_event (
+                    id, actor, object_type, object_id, before_state, after_state, trace_id
+                ) VALUES (%s, %s, 'document', %s, %s, %s, %s)
+                """,
+                (
+                    uuid4(), access_scope.principal_id, document_id,
+                    Jsonb({"withdrawn": False, "state_generation": expected_generation}),
+                    Jsonb({"withdrawn": True, "state_generation": expected_generation + 1}),
+                    str(uuid4()),
+                ),
+            )
 
     def delete(
         self,
