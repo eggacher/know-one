@@ -35,6 +35,7 @@ from know_one.embedding import OpenAIEmbeddingClient
 from know_one.errors import (
     AccessDenied,
     ConcurrentModification,
+    DependencyUnavailable,
     IdempotencyConflict,
     InvalidArgument,
     NotFoundOrForbidden,
@@ -1133,6 +1134,29 @@ class KnowOne:
             raise InvalidArgument("M2 全文检索暂不支持 applicability 条件")
 
         with self._connect() as connection:
+            active = connection.execute(
+                """
+                SELECT namespace.id, namespace.current_index_generation_id,
+                       generation.embedding_model, generation.dims
+                FROM namespace
+                JOIN index_generation AS generation
+                  ON generation.id = namespace.current_index_generation_id
+                WHERE namespace.name = %s
+                """,
+                (namespace,),
+            ).fetchone()
+        if active is None:
+            raise NotFoundOrForbidden("Namespace 不存在或无权访问")
+        vector_rows = []
+        try:
+            # 模型调用位于数据库连接的事务之外，避免网络延迟持有数据库锁。
+            query_vector = OpenAIEmbeddingClient(
+                self._embedding_endpoint, active["embedding_model"], active["dims"]
+            ).embed([query])[0]
+        except (DependencyUnavailable, InvalidArgument):
+            query_vector = None
+
+        with self._connect() as connection:
             namespace_row = connection.execute(
                 """SELECT id, current_index_generation_id FROM namespace WHERE name = %s""",
                 (namespace,),
@@ -1172,6 +1196,43 @@ class KnowOne:
                     access_scope.principal_id, at, at, query, query, top_k,
                 ),
             ).fetchall()
+            if query_vector is not None:
+                vector_literal = "[" + ",".join(str(value) for value in query_vector) + "]"
+                vector_rows = connection.execute(
+                    """
+                    SELECT chunk.id AS chunk_id, chunk.raw_text, chunk.source_locator,
+                           chunk.heading_path, revision.id AS revision_id, document.id AS document_id,
+                           publication.valid_from, publication.valid_until
+                    FROM chunk
+                    JOIN revision_index_build AS build
+                      ON build.revision_id = chunk.revision_id
+                     AND build.index_generation_id = chunk.index_generation_id
+                    JOIN document_revision AS revision ON revision.id = chunk.revision_id
+                    JOIN document ON document.id = revision.document_id
+                    JOIN publication ON publication.revision_id = revision.id
+                                     AND publication.document_id = document.id
+                    WHERE chunk.namespace_id = %s
+                      AND chunk.index_generation_id = %s
+                      AND build.status = 'ready'
+                      AND document.withdrawn = false AND document.deleted_at IS NULL
+                      AND document.acl @> jsonb_build_object('principals', jsonb_build_array(%s::text))
+                      AND publication.valid_from <= %s
+                      AND (publication.valid_until IS NULL OR %s < publication.valid_until)
+                    ORDER BY chunk.embedding <=> CAST(%s AS vector), chunk.ordinal
+                    LIMIT %s
+                    """,
+                    (
+                        namespace_row["id"], namespace_row["current_index_generation_id"],
+                        access_scope.principal_id, at, at, vector_literal, top_k,
+                    ),
+                ).fetchall()
+        fused: dict[object, tuple[dict, float]] = {}
+        for candidates in (rows, vector_rows):
+            for rank, row in enumerate(candidates, start=1):
+                existing = fused.get(row["chunk_id"])
+                score = 1 / (60 + rank) + (existing[1] if existing else 0.0)
+                fused[row["chunk_id"]] = (row, score)
+        ranked_rows = sorted(fused.values(), key=lambda item: -item[1])[:top_k]
         return RetrievalResult(
             evidence=tuple(
                 Evidence(
@@ -1179,10 +1240,13 @@ class KnowOne:
                     revision_id=str(row["revision_id"]), chunk_id=str(row["chunk_id"]),
                     source_locator=row["source_locator"], heading_path=tuple(row["heading_path"]),
                     publication_valid_from=row["valid_from"], publication_valid_until=row["valid_until"],
-                ) for row in rows
+                    rank_score=score,
+                ) for row, score in ranked_rows
             ),
             index_generation=str(namespace_row["current_index_generation_id"]),
             model_version=generation["embedding_model"], trace_id=str(uuid4()),
+            degraded=query_vector is None,
+            warnings=("vector_retrieval_unavailable",) if query_vector is None else (),
         )
 
 

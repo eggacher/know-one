@@ -401,3 +401,60 @@ def test_retrieve_uses_only_the_active_index_generation(
     )
     assert result.index_generation == new_generation_id
     assert len(result.evidence) == 1
+
+
+def test_retrieve_returns_a_vector_only_match(dsn: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    """query 无全文词元命中时，向量召回仍可返回已发布的语义匹配原文。"""
+    namespace = f"test-{uuid4()}"
+    create_namespace(dsn, namespace)
+    scope = AccessScope("reader", frozenset({namespace}), frozenset({"ingest", "publish", "read"}))
+    kb = KnowOne(dsn)
+    vector = [0.0] * 1024
+    vector[0] = 1.0
+    monkeypatch.setattr(
+        "know_one.core.api.OpenAIEmbeddingClient.embed",
+        lambda _client, texts: [vector.copy() for _ in texts],
+    )
+    ref = kb.ingest(TextSource("保养周期为 5000 公里。"), namespace, "manual", scope, "ingest")
+    kb.process_job(ref.job_id)
+    revision_id = kb.get_ingestion(ref.job_id, scope).revision_id
+    assert revision_id is not None
+    kb.publish(
+        revision_id, namespace, datetime(2026, 9, 1, tzinfo=UTC), None, 0, scope, "publish"
+    )
+
+    result = kb.retrieve("语义相近问题", namespace, scope, at=datetime(2026, 9, 2, tzinfo=UTC))
+
+    assert [evidence.text for evidence in result.evidence] == ["保养周期为 5000 公里。"]
+
+
+def test_retrieve_rrf_prioritizes_a_chunk_returned_by_both_paths(
+    dsn: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """同时命中全文与向量的 Chunk 应获得高于单路命中的 RRF 分数。"""
+    namespace = f"test-{uuid4()}"
+    create_namespace(dsn, namespace)
+    scope = AccessScope("reader", frozenset({namespace}), frozenset({"ingest", "publish", "read"}))
+    kb = KnowOne(dsn)
+    vector = [0.0] * 1024
+    vector[0] = 1.0
+    monkeypatch.setattr(
+        "know_one.core.api.OpenAIEmbeddingClient.embed",
+        lambda _client, texts: [vector.copy() for _ in texts],
+    )
+    revisions: list[str] = []
+    for source_key, text in (("both", "关键词命中。"), ("vector", "语义候选。")):
+        ref = kb.ingest(TextSource(text), namespace, source_key, scope, f"ingest-{source_key}")
+        kb.process_job(ref.job_id)
+        revision_id = kb.get_ingestion(ref.job_id, scope).revision_id
+        assert revision_id is not None
+        revisions.append(revision_id)
+    valid_from = datetime(2026, 9, 1, tzinfo=UTC)
+    for index, revision_id in enumerate(revisions):
+        kb.publish(revision_id, namespace, valid_from, None, 0, scope, f"publish-{index}")
+
+    result = kb.retrieve("关键词命中", namespace, scope, at=datetime(2026, 9, 2, tzinfo=UTC))
+
+    assert [evidence.text for evidence in result.evidence] == ["关键词命中。", "语义候选。"]
+    assert result.evidence[0].score_type == "rrf"
+    assert result.evidence[0].rank_score > result.evidence[1].rank_score

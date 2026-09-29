@@ -103,6 +103,8 @@ class Evidence:
     publication_valid_from: datetime
     publication_valid_until: datetime | None
     heading_path: tuple[str, ...] = ()
+    rank_score: float = 0.0
+    score_type: str = "rrf"
 
 
 @dataclass(frozen=True)
