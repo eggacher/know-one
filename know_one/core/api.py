@@ -594,6 +594,17 @@ class KnowOne:
         return psycopg.connect(self._dsn, row_factory=dict_row)
 
     @staticmethod
+    def _set_retrieval_statement_timeout(connection: psycopg.Connection, deadline: float) -> None:
+        """把剩余检索预算映射为当前数据库事务的 statement_timeout。"""
+        remaining_ms = int((deadline - monotonic()) * 1000)
+        if remaining_ms <= 0:
+            raise DeadlineExceeded("检索 deadline 已耗尽")
+        connection.execute(
+            "SELECT set_config('statement_timeout', %s, true)",
+            (f"{remaining_ms}ms",),
+        )
+
+    @staticmethod
     def _require_permission(scope: AccessScope, namespace: str, permission: str) -> None:
         """在任何数据库写入前失败关闭地检查调用方授权。"""
         if not scope.allows(namespace, permission):
@@ -1362,6 +1373,7 @@ class KnowOne:
             raise InvalidArgument("applicability 必须是字典")
 
         with self._connect() as connection:
+            self._set_retrieval_statement_timeout(connection, deadline)
             active = connection.execute(
                 """
                 SELECT namespace.id, namespace.current_index_generation_id,
@@ -1377,6 +1389,7 @@ class KnowOne:
             raise NotFoundOrForbidden("Namespace 不存在或无权访问")
         if not applicability:
             with self._connect() as connection:
+                self._set_retrieval_statement_timeout(connection, deadline)
                 requires_applicability = connection.execute(
                     """
                     SELECT 1 FROM document
@@ -1402,6 +1415,7 @@ class KnowOne:
             raise DeadlineExceeded("检索 deadline 已耗尽")
 
         with self._connect() as connection:
+            self._set_retrieval_statement_timeout(connection, deadline)
             namespace_row = connection.execute(
                 """SELECT id, current_index_generation_id FROM namespace WHERE name = %s""",
                 (namespace,),
@@ -1484,6 +1498,7 @@ class KnowOne:
         ranked_rows = sorted(fused.values(), key=lambda item: -item[1])[:top_k]
         if ranked_rows:
             with self._connect() as connection:
+                self._set_retrieval_statement_timeout(connection, deadline)
                 valid_rows = connection.execute(
                     """
                     SELECT chunk.id
