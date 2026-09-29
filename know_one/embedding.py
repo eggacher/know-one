@@ -20,12 +20,14 @@ class OpenAIEmbeddingClient:
         self._model = model
         self._dimensions = dimensions
 
-    def embed(self, texts: list[str]) -> list[list[float]]:
+    def embed(self, texts: list[str], *, timeout_seconds: float = 30) -> list[list[float]]:
         """为顺序文本批量生成向量；网络与协议错误不产生半成品。"""
+        if timeout_seconds <= 0:
+            raise InvalidArgument("embedding 超时预算必须大于 0")
         payload = json.dumps({"input": texts, "model": self._model}).encode("utf-8")
         request = Request(self._url, payload, {"Content-Type": "application/json"}, method="POST")
         try:
-            with urlopen(request, timeout=30) as response:  # noqa: S310 -- endpoint 由部署方配置
+            with urlopen(request, timeout=timeout_seconds) as response:  # noqa: S310 -- endpoint 由部署方配置
                 body = json.loads(response.read())
         except (HTTPError, URLError, TimeoutError, json.JSONDecodeError) as error:
             raise DependencyUnavailable("embedding 服务不可用或返回无效 JSON") from error

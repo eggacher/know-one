@@ -24,6 +24,7 @@ from hashlib import sha256
 import json
 import os
 import re
+from time import monotonic
 from uuid import uuid4
 
 import psycopg
@@ -35,6 +36,7 @@ from know_one.embedding import OpenAIEmbeddingClient
 from know_one.errors import (
     AccessDenied,
     ConcurrentModification,
+    DeadlineExceeded,
     DependencyUnavailable,
     IdempotencyConflict,
     InvalidArgument,
@@ -1350,6 +1352,7 @@ class KnowOne:
             raise InvalidArgument("top_k 必须在 1 到 20 之间")
         if deadline_ms <= 0:
             raise InvalidArgument("deadline_ms 必须大于 0")
+        deadline = monotonic() + deadline_ms / 1000
         at = at or datetime.now(UTC)
         _validate_timezone(at, field_name="at")
         if at > datetime.now(at.tzinfo):
@@ -1387,11 +1390,16 @@ class KnowOne:
         vector_rows = []
         try:
             # 模型调用位于数据库连接的事务之外，避免网络延迟持有数据库锁。
+            remaining_seconds = deadline - monotonic()
+            if remaining_seconds <= 0:
+                raise DeadlineExceeded("检索 deadline 已耗尽")
             query_vector = OpenAIEmbeddingClient(
                 self._embedding_endpoint, active["embedding_model"], active["dims"]
-            ).embed([query])[0]
+            ).embed([query], timeout_seconds=remaining_seconds)[0]
         except (DependencyUnavailable, InvalidArgument):
             query_vector = None
+        if monotonic() >= deadline:
+            raise DeadlineExceeded("检索 deadline 已耗尽")
 
         with self._connect() as connection:
             namespace_row = connection.execute(
@@ -1465,6 +1473,8 @@ class KnowOne:
                         access_scope.principal_id, Jsonb(applicability), at, at, vector_literal, top_k,
                     ),
                 ).fetchall()
+        if monotonic() >= deadline:
+            raise DeadlineExceeded("检索 deadline 已耗尽")
         fused: dict[object, tuple[dict, float]] = {}
         for candidates in (rows, vector_rows):
             for rank, row in enumerate(candidates, start=1):

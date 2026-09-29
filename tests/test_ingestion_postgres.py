@@ -41,7 +41,7 @@ def test_plain_text_ingestion_creates_ready_revision_and_chunks(
     # 验证数据库写入链路，不依赖开发机是否启动实际模型服务。
     monkeypatch.setattr(
         "know_one.core.api.OpenAIEmbeddingClient.embed",
-        lambda _client, texts: [[0.01] * 1024 for _ in texts],
+        lambda _client, texts, **_kwargs: [[0.01] * 1024 for _ in texts],
     )
     source = TextSource("保养周期为 5000 公里。\n\n如遇极端工况，请缩短保养周期。")
 
@@ -84,7 +84,7 @@ def test_incomplete_index_generation_cannot_be_activated(
     kb = KnowOne(dsn)
     monkeypatch.setattr(
         "know_one.core.api.OpenAIEmbeddingClient.embed",
-        lambda _client, texts: [[0.01] * 1024 for _ in texts],
+        lambda _client, texts, **_kwargs: [[0.01] * 1024 for _ in texts],
     )
     ref = kb.ingest(TextSource("初始内容。"), namespace, "manual", scope, "initial-request")
     kb.process_job(ref.job_id)
@@ -120,7 +120,7 @@ def test_activated_index_generation_receives_subsequent_ingestion(
     kb = KnowOne(dsn)
     monkeypatch.setattr(
         "know_one.core.api.OpenAIEmbeddingClient.embed",
-        lambda _client, texts: [[0.01] * 1024 for _ in texts],
+        lambda _client, texts, **_kwargs: [[0.01] * 1024 for _ in texts],
     )
     initial = kb.ingest(TextSource("旧代内容。"), namespace, "old", scope, "old-request")
     kb.process_job(initial.job_id)
@@ -160,7 +160,7 @@ def test_ready_revision_can_be_published_from_a_past_validity_window(
     kb = KnowOne(dsn)
     monkeypatch.setattr(
         "know_one.core.api.OpenAIEmbeddingClient.embed",
-        lambda _client, texts: [[0.01] * 1024 for _ in texts],
+        lambda _client, texts, **_kwargs: [[0.01] * 1024 for _ in texts],
     )
     ref = kb.ingest(TextSource("可发布内容。"), namespace, "manual", scope, "ingest-request")
     kb.process_job(ref.job_id)
@@ -200,7 +200,7 @@ def test_publish_appends_a_window_and_replays_the_same_idempotency_key(
     kb = KnowOne(dsn)
     monkeypatch.setattr(
         "know_one.core.api.OpenAIEmbeddingClient.embed",
-        lambda _client, texts: [[0.01] * 1024 for _ in texts],
+        lambda _client, texts, **_kwargs: [[0.01] * 1024 for _ in texts],
     )
     first = kb.ingest(TextSource("第一版。"), namespace, "manual", scope, "ingest-v1")
     kb.process_job(first.job_id)
@@ -250,7 +250,7 @@ def test_publish_rejects_incomplete_build_stale_state_and_conflicting_replay(
     kb = KnowOne(dsn)
     monkeypatch.setattr(
         "know_one.core.api.OpenAIEmbeddingClient.embed",
-        lambda _client, texts: [[0.01] * 1024 for _ in texts],
+        lambda _client, texts, **_kwargs: [[0.01] * 1024 for _ in texts],
     )
     ref = kb.ingest(TextSource("待发布内容。"), namespace, "manual", scope, "ingest-request")
     kb.process_job(ref.job_id)
@@ -309,7 +309,7 @@ def test_retrieve_returns_published_chunk_from_active_generation(
     kb = KnowOne(dsn)
     monkeypatch.setattr(
         "know_one.core.api.OpenAIEmbeddingClient.embed",
-        lambda _client, texts: [[0.01] * 1024 for _ in texts],
+        lambda _client, texts, **_kwargs: [[0.01] * 1024 for _ in texts],
     )
     ref = kb.ingest(TextSource("保养周期为 5000 公里。"), namespace, "manual", scope, "ingest")
     kb.process_job(ref.job_id)
@@ -344,7 +344,7 @@ def test_retrieve_excludes_acl_denied_withdrawn_and_outside_window_chunks(
     kb = KnowOne(dsn)
     monkeypatch.setattr(
         "know_one.core.api.OpenAIEmbeddingClient.embed",
-        lambda _client, texts: [[0.01] * 1024 for _ in texts],
+        lambda _client, texts, **_kwargs: [[0.01] * 1024 for _ in texts],
     )
     ref = kb.ingest(TextSource("保养周期为 5000 公里。"), namespace, "manual", editor, "ingest")
     kb.process_job(ref.job_id)
@@ -381,7 +381,7 @@ def test_retrieve_uses_only_the_active_index_generation(
     kb = KnowOne(dsn)
     monkeypatch.setattr(
         "know_one.core.api.OpenAIEmbeddingClient.embed",
-        lambda _client, texts: [[0.01] * 1024 for _ in texts],
+        lambda _client, texts, **_kwargs: [[0.01] * 1024 for _ in texts],
     )
     ref = kb.ingest(TextSource("保养周期为 5000 公里。"), namespace, "manual", scope, "ingest")
     kb.process_job(ref.job_id)
@@ -413,7 +413,7 @@ def test_retrieve_returns_a_vector_only_match(dsn: str, monkeypatch: pytest.Monk
     vector[0] = 1.0
     monkeypatch.setattr(
         "know_one.core.api.OpenAIEmbeddingClient.embed",
-        lambda _client, texts: [vector.copy() for _ in texts],
+        lambda _client, texts, **_kwargs: [vector.copy() for _ in texts],
     )
     ref = kb.ingest(TextSource("保养周期为 5000 公里。"), namespace, "manual", scope, "ingest")
     kb.process_job(ref.job_id)
@@ -440,7 +440,7 @@ def test_retrieve_rrf_prioritizes_a_chunk_returned_by_both_paths(
     vector[0] = 1.0
     monkeypatch.setattr(
         "know_one.core.api.OpenAIEmbeddingClient.embed",
-        lambda _client, texts: [vector.copy() for _ in texts],
+        lambda _client, texts, **_kwargs: [vector.copy() for _ in texts],
     )
     revisions: list[str] = []
     for source_key, text in (("both", "关键词命中。"), ("vector", "语义候选。")):
@@ -468,7 +468,7 @@ def test_retrieve_filters_by_document_applicability(dsn: str, monkeypatch: pytes
     kb = KnowOne(dsn)
     monkeypatch.setattr(
         "know_one.core.api.OpenAIEmbeddingClient.embed",
-        lambda _client, texts: [[0.01] * 1024 for _ in texts],
+        lambda _client, texts, **_kwargs: [[0.01] * 1024 for _ in texts],
     )
     ref = kb.ingest(TextSource("车型保养周期为 5000 公里。"), namespace, "manual", scope, "ingest")
     kb.process_job(ref.job_id)
@@ -508,7 +508,7 @@ def test_withdraw_hides_published_document_and_replays_idempotently(
     kb = KnowOne(dsn)
     monkeypatch.setattr(
         "know_one.core.api.OpenAIEmbeddingClient.embed",
-        lambda _client, texts: [[0.01] * 1024 for _ in texts],
+        lambda _client, texts, **_kwargs: [[0.01] * 1024 for _ in texts],
     )
     ref = kb.ingest(TextSource("保养周期为 5000 公里。"), namespace, "manual", scope, "ingest")
     kb.process_job(ref.job_id)
@@ -549,7 +549,7 @@ def test_set_access_replaces_document_acl_for_subsequent_retrieval(
     kb = KnowOne(dsn)
     monkeypatch.setattr(
         "know_one.core.api.OpenAIEmbeddingClient.embed",
-        lambda _client, texts: [[0.01] * 1024 for _ in texts],
+        lambda _client, texts, **_kwargs: [[0.01] * 1024 for _ in texts],
     )
     ref = kb.ingest(TextSource("保养周期为 5000 公里。"), namespace, "manual", editor, "ingest")
     kb.process_job(ref.job_id)
@@ -578,7 +578,7 @@ def test_delete_marks_document_unretrievable_without_removing_audit_state(
     create_namespace(dsn, namespace)
     scope = AccessScope("editor", frozenset({namespace}), frozenset({"ingest", "publish", "read", "delete"}))
     kb = KnowOne(dsn)
-    monkeypatch.setattr("know_one.core.api.OpenAIEmbeddingClient.embed", lambda _client, texts: [[0.01] * 1024 for _ in texts])
+    monkeypatch.setattr("know_one.core.api.OpenAIEmbeddingClient.embed", lambda _client, texts, **_kwargs: [[0.01] * 1024 for _ in texts])
     ref = kb.ingest(TextSource("保养周期为 5000 公里。"), namespace, "manual", scope, "ingest")
     kb.process_job(ref.job_id)
     revision_id = kb.get_ingestion(ref.job_id, scope).revision_id

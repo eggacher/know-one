@@ -49,3 +49,20 @@ def test_openai_embedding_client_orders_vectors_by_response_index(monkeypatch) -
         "payload": {"input": ["甲", "乙"], "model": "test-model"},
     }
     assert vectors == [[1.0, 0.0], [0.0, 1.0]]
+
+
+def test_openai_embedding_client_uses_the_callers_timeout_budget(monkeypatch) -> None:
+    """在线检索可把剩余 deadline 传给 embedding 适配器。"""
+    seen: dict[str, object] = {}
+
+    def fake_urlopen(_request, timeout: float):
+        seen["timeout"] = timeout
+        return _Response({"data": [{"index": 0, "embedding": [1.0, 0.0]}]})
+
+    monkeypatch.setattr("know_one.embedding.urlopen", fake_urlopen)
+
+    OpenAIEmbeddingClient("http://embedding/v1", "test-model", 2).embed(
+        ["甲"], timeout_seconds=1.5
+    )
+
+    assert seen["timeout"] == 1.5
