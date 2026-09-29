@@ -532,3 +532,39 @@ def test_withdraw_hides_published_document_and_replays_idempotently(
             "SELECT withdrawn, state_generation FROM document WHERE id = %s", (document_id,)
         ).fetchone()
     assert (withdrawn, state_generation) == (True, 2)
+
+
+def test_set_access_replaces_document_acl_for_subsequent_retrieval(
+    dsn: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ACL 变更提交后，旧读者失权且新读者立即获得同一已发布内容。"""
+    namespace = f"test-{uuid4()}"
+    create_namespace(dsn, namespace)
+    editor = AccessScope(
+        "editor",
+        frozenset({namespace}),
+        frozenset({"ingest", "publish", "read", "manage_acl"}),
+    )
+    reader = AccessScope("reader", frozenset({namespace}), frozenset({"read"}))
+    kb = KnowOne(dsn)
+    monkeypatch.setattr(
+        "know_one.core.api.OpenAIEmbeddingClient.embed",
+        lambda _client, texts: [[0.01] * 1024 for _ in texts],
+    )
+    ref = kb.ingest(TextSource("保养周期为 5000 公里。"), namespace, "manual", editor, "ingest")
+    kb.process_job(ref.job_id)
+    revision_id = kb.get_ingestion(ref.job_id, editor).revision_id
+    assert revision_id is not None
+    kb.publish(
+        revision_id, namespace, datetime(2026, 9, 1, tzinfo=UTC), None, 0, editor, "publish"
+    )
+    with psycopg.connect(dsn) as connection:
+        document_id = connection.execute(
+            "SELECT id FROM document WHERE namespace_id = (SELECT id FROM namespace WHERE name = %s)",
+            (namespace,),
+        ).fetchone()[0]
+
+    kb.set_access(str(document_id), {"principals": ["reader"]}, 1, editor, "set-access")
+
+    assert not kb.retrieve("保养周期为", namespace, editor, at=datetime(2026, 9, 2, tzinfo=UTC)).evidence
+    assert kb.retrieve("保养周期为", namespace, reader, at=datetime(2026, 9, 2, tzinfo=UTC)).evidence

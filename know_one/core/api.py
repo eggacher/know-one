@@ -1139,6 +1139,88 @@ class KnowOne:
                 ),
             )
 
+    def set_access(
+        self,
+        document_id: str,
+        acl: dict,
+        expected_generation: int,
+        access_scope: AccessScope,
+        idempotency_key: str,
+    ) -> None:
+        """原子替换 Document 当前 ACL，并使下一次检索立即使用新权限。"""
+        principals = acl.get("principals") if isinstance(acl, dict) else None
+        if (
+            not document_id.strip()
+            or not idempotency_key.strip()
+            or not isinstance(principals, list)
+            or not principals
+            or not all(isinstance(principal, str) and principal for principal in principals)
+        ):
+            raise InvalidArgument("acl 必须包含非空 principals 字符串列表")
+        if expected_generation < 0:
+            raise InvalidArgument("expected_generation 不能为负数")
+        fingerprint = sha256(
+            json.dumps(
+                {"document_id": document_id, "acl": acl, "expected_generation": expected_generation},
+                sort_keys=True,
+            ).encode("utf-8")
+        ).hexdigest()
+        with self._connect() as connection, connection.transaction():
+            document = connection.execute(
+                """
+                SELECT document.id, document.acl, document.state_generation,
+                       namespace.id AS namespace_id, namespace.name AS namespace
+                FROM document JOIN namespace ON namespace.id = document.namespace_id
+                WHERE document.id = %s FOR UPDATE OF document
+                """,
+                (document_id,),
+            ).fetchone()
+            if document is None:
+                raise NotFoundOrForbidden("Document 不存在或无权访问")
+            self._require_permission(access_scope, document["namespace"], "manage_acl")
+            receipt = connection.execute(
+                """
+                SELECT request_fingerprint FROM operation_receipt
+                WHERE namespace_id = %s AND operation = 'set_access' AND idempotency_key = %s
+                FOR UPDATE
+                """,
+                (document["namespace_id"], idempotency_key),
+            ).fetchone()
+            if receipt is not None:
+                if receipt["request_fingerprint"] != fingerprint:
+                    raise IdempotencyConflict("同一幂等键对应了不同的 ACL 请求")
+                return
+            if document["state_generation"] != expected_generation:
+                raise ConcurrentModification("Document 的 state_generation 已变化")
+            connection.execute(
+                """
+                UPDATE document SET acl = %s, state_generation = state_generation + 1, updated_at = now()
+                WHERE id = %s
+                """,
+                (Jsonb(acl), document_id),
+            )
+            connection.execute(
+                """
+                INSERT INTO operation_receipt (
+                    id, namespace_id, operation, idempotency_key,
+                    request_fingerprint, status, result_ref, completed_at
+                ) VALUES (%s, %s, 'set_access', %s, %s, 'succeeded', %s, now())
+                """,
+                (uuid4(), document["namespace_id"], idempotency_key, fingerprint, Jsonb({"document_id": document_id})),
+            )
+            connection.execute(
+                """
+                INSERT INTO audit_event (
+                    id, actor, object_type, object_id, before_state, after_state, trace_id
+                ) VALUES (%s, %s, 'document', %s, %s, %s, %s)
+                """,
+                (
+                    uuid4(), access_scope.principal_id, document_id,
+                    Jsonb({"acl": document["acl"], "state_generation": expected_generation}),
+                    Jsonb({"acl": acl, "state_generation": expected_generation + 1}), str(uuid4()),
+                ),
+            )
+
     def delete(
         self,
         document_id: str,
