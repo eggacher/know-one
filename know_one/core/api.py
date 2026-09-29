@@ -3,9 +3,8 @@
 接口契约的权威定义见 docs/contracts.md；数据生命周期见
 docs/architecture.md「数据生命周期与变更流程」。
 
-首版（M1）实现 ingest / get_ingestion 及配套的 worker 执行入口 process_job；
-publish / withdraw / set_access / delete / retrieve 为已定义契约的占位方法，
-调用会抛出 NotImplementedError，方法注释仍完整描述目标语义，作为后续实现依据。
+首版实现 ingest / get_ingestion 及配套的 worker 执行入口 process_job、
+IndexGeneration 管理、发布和生命周期管理，以及受约束的混合检索。
 
 用法示意（README 中的调用形态）::
 
@@ -382,11 +381,11 @@ class KnowOne:
                 raise InvalidArgument("目标 IndexGeneration 与本地 embedding 配置不一致")
             revisions = connection.execute(
                 """
-                SELECT revision.id, source.source_bytes
+                SELECT revision.id, source.source_bytes, source.source_media_type
                 FROM document_revision AS revision
                 JOIN document ON document.id = revision.document_id
                 JOIN LATERAL (
-                    SELECT source_bytes
+                    SELECT source_bytes, source_media_type
                     FROM ingestion_job
                     WHERE result_revision_id = revision.id
                     ORDER BY created_at
@@ -400,15 +399,15 @@ class KnowOne:
 
         for revision in revisions:
             text = bytes(revision["source_bytes"]).decode("utf-8")
-            paragraphs = self._paragraphs(text)
-            if not paragraphs:
+            chunks = self._chunks_for_media_type(text, revision["source_media_type"])
+            if not chunks:
                 raise InvalidArgument("Revision 原文中没有可切分的文本段落")
             # 外部网络调用绝不放入数据库事务，避免长时间持锁。
             vectors = OpenAIEmbeddingClient(
                 self._embedding_endpoint, self._embedding_model, self._embedding_dimensions
-            ).embed([raw_text for raw_text, _, _ in paragraphs])
+            ).embed([chunk[0] for chunk in chunks])
             self._write_rebuilt_revision(
-                generation["namespace_id"], generation_id, revision["id"], paragraphs, vectors
+                generation["namespace_id"], generation_id, revision["id"], chunks, vectors
             )
 
     def _write_rebuilt_revision(
@@ -416,7 +415,7 @@ class KnowOne:
         namespace_id: object,
         generation_id: str,
         revision_id: object,
-        paragraphs: list[tuple[str, int, int]],
+        chunks: list[tuple[str, int, int, tuple[str, ...]]],
         vectors: list[list[float]],
     ) -> None:
         """在短事务中覆盖一个 Revision 在 building generation 中的草稿。"""
@@ -464,20 +463,20 @@ class KnowOne:
                     """,
                     (revision_id, generation_id),
                 )
-            for ordinal, ((raw_text, start, end), vector) in enumerate(
-                zip(paragraphs, vectors, strict=True)
+            for ordinal, ((raw_text, start, end, heading_path), vector) in enumerate(
+                zip(chunks, vectors, strict=True)
             ):
                 connection.execute(
                     """
                     INSERT INTO chunk (
                         id, namespace_id, revision_id, index_generation_id, ordinal,
-                        raw_text, search_text, source_locator, embedding, tsv
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s,
+                        raw_text, search_text, heading_path, source_locator, embedding, tsv
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s,
                               CAST(%s AS vector), to_tsvector('simple', %s))
                     """,
                     (
                         uuid4(), namespace_id, revision_id, generation_id, ordinal,
-                        raw_text, raw_text,
+                        raw_text, raw_text, list(heading_path),
                         Jsonb({"char_start": start, "char_end": end}),
                         "[" + ",".join(str(value) for value in vector) + "]", raw_text,
                     ),
@@ -489,7 +488,7 @@ class KnowOne:
                     completed_chunk_count = %s, completed_at = now()
                 WHERE revision_id = %s AND index_generation_id = %s
                 """,
-                (len(paragraphs), len(paragraphs), revision_id, generation_id),
+                (len(chunks), len(chunks), revision_id, generation_id),
             )
 
     def activate_index_generation(self, namespace: str, generation_id: str) -> None:
@@ -614,13 +613,13 @@ class KnowOne:
     def _validate_ingest_arguments(
         source: Source, namespace: str, source_key: str, idempotency_key: str
     ) -> None:
-        """M1 的输入边界：只处理调用方已准备好的 UTF-8 纯文本。"""
+        """校验当前已注册的 UTF-8 文本来源类型与公共入库参数。"""
         if not namespace.strip() or not source_key.strip() or not idempotency_key.strip():
             raise InvalidArgument("namespace、source_key 和 idempotency_key 均不能为空")
         if len(source_key) > 512:
             raise InvalidArgument("source_key 不能超过 512 个字符")
-        if getattr(source, "media_type", None) != "text/plain":
-            raise UnsupportedSource("M1 仅支持 text/plain 来源")
+        if getattr(source, "media_type", None) not in {"text/plain", "text/markdown"}:
+            raise UnsupportedSource("仅支持 text/plain 和 text/markdown 来源")
 
     @staticmethod
     def _fingerprint(source_key: str, content_hash: str, media_type: str) -> str:
@@ -670,17 +669,68 @@ class KnowOne:
         return document_id
 
     @staticmethod
-    def _paragraphs(text: str) -> list[tuple[str, int, int]]:
+    def _paragraphs(text: str) -> list[tuple[str, int, int, tuple[str, ...]]]:
         """按空行切分连续原文段落，保留字符区间供证据定位。
 
         这是有意保守的 M1 兜底切块；标题树、FAQ、表格及句子依赖关系由
         后续解析器提供后再接入，不在这里假装理解语义。
         """
-        chunks: list[tuple[str, int, int]] = []
+        chunks: list[tuple[str, int, int, tuple[str, ...]]] = []
         for match in re.finditer(r"\S(?:.*?\S)?(?=\s*\n\s*\n|\s*\Z)", text, re.DOTALL):
             raw_text = match.group(0)
-            chunks.append((raw_text, match.start(), match.end()))
+            chunks.append((raw_text, match.start(), match.end(), ()))
         return chunks
+
+    @staticmethod
+    def _markdown_paragraphs(text: str) -> list[tuple[str, int, int, tuple[str, ...]]]:
+        """按 Markdown ATX 标题切分段落，并保留段落所在标题路径与原文区间。"""
+        chunks: list[tuple[str, int, int, tuple[str, ...]]] = []
+        headings: list[str] = []
+        paragraph_start: int | None = None
+        paragraph_end: int | None = None
+        paragraph_path: tuple[str, ...] = ()
+        offset = 0
+
+        def finish_paragraph() -> None:
+            """提交当前非空段落；标题行本身不是可引用正文。"""
+            nonlocal paragraph_start, paragraph_end
+            if paragraph_start is not None and paragraph_end is not None:
+                chunks.append(
+                    (text[paragraph_start:paragraph_end], paragraph_start, paragraph_end, paragraph_path)
+                )
+            paragraph_start = None
+            paragraph_end = None
+
+        for line in text.splitlines(keepends=True):
+            line_end = offset + len(line)
+            content = line.rstrip("\r\n")
+            heading = re.fullmatch(r"(#{1,6})[ \t]+(.+?)[ \t]*", content)
+            if heading:
+                finish_paragraph()
+                level = len(heading.group(1))
+                title = heading.group(2).rstrip("#").rstrip()
+                headings[level - 1 :] = [title]
+            elif not content.strip():
+                finish_paragraph()
+            else:
+                if paragraph_start is None:
+                    paragraph_start = offset
+                    paragraph_path = tuple(headings)
+                paragraph_end = offset + len(content)
+            offset = line_end
+        finish_paragraph()
+        return chunks
+
+    @classmethod
+    def _chunks_for_media_type(
+        cls, text: str, media_type: str
+    ) -> list[tuple[str, int, int, tuple[str, ...]]]:
+        """按提交时冻结的媒体类型解析，保证索引重建复现原始切块规则。"""
+        if media_type == "text/plain":
+            return cls._paragraphs(text)
+        if media_type == "text/markdown":
+            return cls._markdown_paragraphs(text)
+        raise UnsupportedSource(f"未注册的来源媒体类型：{media_type}")
 
     def _process_job(self, job_id: str, lease_seconds: int) -> None:
         """先领取任务并在事务外生成向量，再用短事务写入完整构建。"""
@@ -724,13 +774,13 @@ class KnowOne:
             )
 
         text = bytes(job["source_bytes"]).decode("utf-8")
-        paragraphs = self._paragraphs(text)
-        if not paragraphs:
+        chunks = self._chunks_for_media_type(text, job["source_media_type"])
+        if not chunks:
             raise InvalidArgument("来源中没有可切分的文本段落")
         # 外部网络调用绝不放入数据库事务，避免长时间持锁。
         vectors = OpenAIEmbeddingClient(
             self._embedding_endpoint, self._embedding_model, self._embedding_dimensions
-        ).embed([raw_text for raw_text, _, _ in paragraphs])
+        ).embed([chunk[0] for chunk in chunks])
 
         with self._connect() as connection, connection.transaction():
             current_generation = connection.execute(
@@ -828,18 +878,20 @@ class KnowOne:
                     (revision_id, generation_id),
                 )
 
-            for ordinal, ((raw_text, start, end), vector) in enumerate(zip(paragraphs, vectors, strict=True)):
+            for ordinal, ((raw_text, start, end, heading_path), vector) in enumerate(
+                zip(chunks, vectors, strict=True)
+            ):
                 connection.execute(
                     """
                     INSERT INTO chunk (
                         id, namespace_id, revision_id, index_generation_id, ordinal,
-                        raw_text, search_text, source_locator, embedding, tsv
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s,
+                        raw_text, search_text, heading_path, source_locator, embedding, tsv
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s,
                               CAST(%s AS vector), to_tsvector('simple', %s))
                     """,
                     (
                         uuid4(), job["namespace_id"], revision_id, generation_id, ordinal,
-                        raw_text, raw_text,
+                        raw_text, raw_text, list(heading_path),
                         Jsonb({"char_start": start, "char_end": end}),
                         "[" + ",".join(str(value) for value in vector) + "]", raw_text,
                     ),
@@ -851,7 +903,7 @@ class KnowOne:
                     completed_chunk_count = %s, completed_at = now()
                 WHERE revision_id = %s AND index_generation_id = %s
                 """,
-                (len(paragraphs), len(paragraphs), revision_id, generation_id),
+                (len(chunks), len(chunks), revision_id, generation_id),
             )
             self._finish_job(connection, job_id, revision_id)
 

@@ -16,8 +16,8 @@ from know_one import (
     InvalidArgument,
     KnowOne,
 )
-from know_one.cli import create_namespace
-from know_one.ingestion import TextSource
+from know_one.cli import create_namespace, main
+from know_one.ingestion import MarkdownSource, TextSource
 
 
 @pytest.fixture
@@ -72,6 +72,39 @@ def test_plain_text_ingestion_creates_ready_revision_and_chunks(
     assert chunks[0][1]["char_start"] == 0
     assert [chunk[2] for chunk in chunks] == [1024, 1024]
     assert build == ("ready", 2, 2)
+
+
+def test_markdown_ingestion_preserves_heading_paths_and_source_ranges(
+    dsn: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Markdown 标题不进入正文 Chunk，但为后续段落提供可追溯的标题路径。"""
+    namespace = f"test-{uuid4()}"
+    create_namespace(dsn, namespace)
+    scope = AccessScope("tester", frozenset({namespace}), frozenset({"ingest"}))
+    source = MarkdownSource("# 账户\n账户总览。\n\n## 密码\n忘记密码后请重置。")
+    monkeypatch.setattr(
+        "know_one.core.api.OpenAIEmbeddingClient.embed",
+        lambda _client, texts, **_kwargs: [[0.01] * 1024 for _ in texts],
+    )
+
+    kb = KnowOne(dsn)
+    job = kb.ingest(source, namespace, "guide", scope, "markdown-ingest")
+    kb.process_job(job.job_id)
+    revision_id = kb.get_ingestion(job.job_id, scope).revision_id
+    assert revision_id is not None
+
+    with psycopg.connect(dsn) as connection:
+        chunks = connection.execute(
+            """
+            SELECT raw_text, heading_path, source_locator
+            FROM chunk WHERE revision_id = %s ORDER BY ordinal
+            """,
+            (revision_id,),
+        ).fetchall()
+    assert chunks == [
+        ("账户总览。", ["账户"], {"char_end": 10, "char_start": 5}),
+        ("忘记密码后请重置。", ["账户", "密码"], {"char_end": 27, "char_start": 18}),
+    ]
 
 
 def test_incomplete_index_generation_cannot_be_activated(
@@ -610,3 +643,60 @@ def test_delete_marks_document_unretrievable_without_removing_audit_state(
     assert deleted_at is not None
     assert withdrawn is True
     assert counts == (0, 0, 0, 0, True)
+
+
+def test_local_lifecycle_cli_changes_published_document_visibility(
+    dsn: str, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """本地 CLI 的发布、ACL、撤回和删除均作用于真实持久化生命周期。"""
+    namespace = f"test-{uuid4()}"
+    create_namespace(dsn, namespace)
+    editor = AccessScope("editor", frozenset({namespace}), frozenset({"ingest", "read"}))
+    reader = AccessScope("reader", frozenset({namespace}), frozenset({"read"}))
+    kb = KnowOne(dsn)
+    monkeypatch.setattr(
+        "know_one.core.api.OpenAIEmbeddingClient.embed",
+        lambda _client, texts, **_kwargs: [[0.01] * 1024 for _ in texts],
+    )
+    job = kb.ingest(TextSource("保养周期为 5000 公里。"), namespace, "manual", editor, "ingest")
+    kb.process_job(job.job_id)
+    revision_id = kb.get_ingestion(job.job_id, editor).revision_id
+    assert revision_id is not None
+    with psycopg.connect(dsn) as connection:
+        document_id = connection.execute(
+            "SELECT id FROM document WHERE namespace_id = (SELECT id FROM namespace WHERE name = %s)",
+            (namespace,),
+        ).fetchone()[0]
+
+    assert main(
+        [
+            "publish", namespace, revision_id, "2026-09-01T00:00:00+00:00",
+            "--expected-generation", "0", "--idempotency-key", "publish-cli", "--dsn", dsn,
+        ]
+    ) == 0
+    assert "Revision 已发布" in capsys.readouterr().out
+    assert kb.retrieve("保养周期", namespace, editor, at=datetime(2026, 9, 2, tzinfo=UTC)).evidence
+
+    assert main(
+        [
+            "set-access", namespace, str(document_id), '{"principals":["reader"]}',
+            "--expected-generation", "1", "--idempotency-key", "acl-cli", "--dsn", dsn,
+        ]
+    ) == 0
+    assert "ACL 已更新" in capsys.readouterr().out
+    assert not kb.retrieve("保养周期", namespace, editor, at=datetime(2026, 9, 2, tzinfo=UTC)).evidence
+    assert kb.retrieve("保养周期", namespace, reader, at=datetime(2026, 9, 2, tzinfo=UTC)).evidence
+
+    assert main(
+        [
+            "withdraw", namespace, str(document_id), "--expected-generation", "2",
+            "--idempotency-key", "withdraw-cli", "--dsn", dsn,
+        ]
+    ) == 0
+    assert "Document 已撤回" in capsys.readouterr().out
+    assert not kb.retrieve("保养周期", namespace, reader, at=datetime(2026, 9, 2, tzinfo=UTC)).evidence
+
+    assert main(
+        ["delete", namespace, str(document_id), "--idempotency-key", "delete-cli", "--dsn", dsn]
+    ) == 0
+    assert "Document 内容已删除" in capsys.readouterr().out
