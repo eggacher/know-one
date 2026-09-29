@@ -2,7 +2,7 @@
 
 可嵌入 Python 业务系统的知识入库与检索库，首个落地场景是中文客服 FAQ 和公告。
 
-**当前状态：已具备纯文本入库、IndexGeneration 重建切换、发布、受约束的全文/向量混合检索，以及 Document 撤回、ACL 更新和立即删除。PDF/HTML/Markdown 解析与重排尚未实现，也没有商用性能或质量验证。**
+**当前状态：已具备纯文本与 Markdown 入库、IndexGeneration 重建切换、发布、受约束的全文/向量混合检索，以及 Document 撤回、ACL 更新和立即删除。PDF/HTML 解析与重排尚未实现，也没有商用性能或质量验证。**
 
 ## 范围与职责
 

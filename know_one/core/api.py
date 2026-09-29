@@ -683,12 +683,23 @@ class KnowOne:
 
     @staticmethod
     def _markdown_paragraphs(text: str) -> list[tuple[str, int, int, tuple[str, ...]]]:
-        """按 Markdown ATX 标题切分段落，并保留段落所在标题路径与原文区间。"""
+        """按 Markdown ATX 标题切分段落，并保留段落所在标题路径与原文区间。
+
+        围栏代码块采用 CommonMark 的简化规则：同字符（``` 或 ~~~）、闭栏不短于
+        开栏、闭栏不带信息串；未闭合时延伸到文档结束。围栏内的 # 行是代码
+        注释，不得识别为标题，否则会污染其后所有正文的标题路径。
+
+        其余有意保守的边界：不识别 Setext（下划线式）标题与孤立空标题行，
+        两者均按正文保留；tests/test_markdown_parsing.py 的钉子测试固化了
+        这些行为。
+        """
         chunks: list[tuple[str, int, int, tuple[str, ...]]] = []
         headings: list[str] = []
         paragraph_start: int | None = None
         paragraph_end: int | None = None
         paragraph_path: tuple[str, ...] = ()
+        fence_char = ""  # 当前所在围栏的标记字符；空串表示不在围栏内
+        fence_length = 0  # 开栏标记长度，闭栏必须不短于它
         offset = 0
 
         def finish_paragraph() -> None:
@@ -704,15 +715,42 @@ class KnowOne:
         for line in text.splitlines(keepends=True):
             line_end = offset + len(line)
             content = line.rstrip("\r\n")
-            heading = re.fullmatch(r"(#{1,6})[ \t]+(.+?)[ \t]*", content)
-            if heading:
-                finish_paragraph()
-                level = len(heading.group(1))
-                title = heading.group(2).rstrip("#").rstrip()
-                headings[level - 1 :] = [title]
-            elif not content.strip():
-                finish_paragraph()
+            # 一行内的围栏标记：至多 3 个前导空格 + 3 个以上反引号或波浪线，
+            # 后面可跟信息串（开栏）或仅空白（闭栏）。
+            fence = re.fullmatch(r" {0,3}(`{3,}|~{3,})[ \t]*(.*)", content)
+            if fence_char:
+                # 围栏内不识别标题；只有同字符、不短于开栏且无信息串的裸标记行
+                # 才能闭合围栏，围栏内容和闭栏行都作为正文保留。
+                if (
+                    fence
+                    and fence.group(2).strip() == ""
+                    and fence.group(1)[0] == fence_char
+                    and len(fence.group(1)) >= fence_length
+                ):
+                    fence_char = ""
+                    fence_length = 0
+                body = True
             else:
+                heading = re.fullmatch(r"(#{1,6})[ \t]+(.+?)[ \t]*", content)
+                if fence:
+                    # 开栏行本身进入正文片段，保证证据能回溯到原文。
+                    fence_char = fence.group(1)[0]
+                    fence_length = len(fence.group(1))
+                    body = True
+                elif heading:
+                    finish_paragraph()
+                    level = len(heading.group(1))
+                    # 闭合 # 序列前置空格才剥离（CommonMark 规则）；否则 C#、
+                    # F# 这类以 # 结尾的标题会被静默截断。
+                    title = re.sub(r"[ \t]+#+[ \t]*$", "", heading.group(2)).rstrip()
+                    headings[level - 1 :] = [title]
+                    body = False
+                elif not content.strip():
+                    finish_paragraph()
+                    body = False
+                else:
+                    body = True
+            if body:
                 if paragraph_start is None:
                     paragraph_start = offset
                     paragraph_path = tuple(headings)
@@ -725,7 +763,11 @@ class KnowOne:
     def _chunks_for_media_type(
         cls, text: str, media_type: str
     ) -> list[tuple[str, int, int, tuple[str, ...]]]:
-        """按提交时冻结的媒体类型解析，保证索引重建复现原始切块规则。"""
+        """按提交时冻结的媒体类型解析，保证索引重建复现原始切块规则。
+
+        标题路径仅存入 heading_path 列，暂不拼入 search_text/embedding，
+        即不参与全文与向量召回；这是首版有意取舍，待检索评测后再调整。
+        """
         if media_type == "text/plain":
             return cls._paragraphs(text)
         if media_type == "text/markdown":

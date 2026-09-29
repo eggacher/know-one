@@ -77,13 +77,20 @@ def test_plain_text_ingestion_creates_ready_revision_and_chunks(
 def test_markdown_ingestion_preserves_heading_paths_and_source_ranges(
     dsn: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Markdown 标题不进入正文 Chunk，但为后续段落提供可追溯的标题路径。"""
+    """Markdown 标题不进入正文 Chunk，但为后续段落提供可追溯的标题路径。
+
+    同时覆盖两个解析边界：代码围栏内的 # 行不改变标题路径；以 # 结尾
+    的标题（如 C#）不被闭合序列规则截断。
+    """
     namespace = f"test-{uuid4()}"
     create_namespace(dsn, namespace)
     scope = AccessScope(
         "tester", frozenset({namespace}), frozenset({"ingest", "publish", "read"})
     )
-    source = MarkdownSource("# 账户\n账户总览。\n\n## 密码\n忘记密码后请重置。")
+    source = MarkdownSource(
+        "# 账户\n账户总览。\n\n## 密码\n忘记密码后请重置。"
+        "\n\n## 排障\n```bash\n# 修改配置文件\nexport FOO=1\n```\n\n重启服务。\n\n## 语言\n支持 C#。"
+    )
     monkeypatch.setattr(
         "know_one.core.api.OpenAIEmbeddingClient.embed",
         lambda _client, texts, **_kwargs: [[0.01] * 1024 for _ in texts],
@@ -106,6 +113,12 @@ def test_markdown_ingestion_preserves_heading_paths_and_source_ranges(
     assert chunks == [
         ("账户总览。", ["账户"], {"char_end": 10, "char_start": 5}),
         ("忘记密码后请重置。", ["账户", "密码"], {"char_end": 27, "char_start": 18}),
+        # 围栏内的 # 注释不改变标题路径，围栏内容作为连续正文保留。
+        ("```bash\n# 修改配置文件\nexport FOO=1\n```", ["账户", "排障"],
+         {"char_end": 68, "char_start": 35}),
+        ("重启服务。", ["账户", "排障"], {"char_end": 75, "char_start": 70}),
+        # 以 # 结尾的标题文字保留，不被当作闭合序列剥离。
+        ("支持 C#。", ["账户", "语言"], {"char_end": 89, "char_start": 83}),
     ]
 
     kb.publish(
