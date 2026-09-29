@@ -593,5 +593,20 @@ def test_delete_marks_document_unretrievable_without_removing_audit_state(
     assert not kb.retrieve("保养周期为", namespace, scope, at=datetime(2026, 9, 2, tzinfo=UTC)).evidence
     with psycopg.connect(dsn) as connection:
         deleted_at, withdrawn = connection.execute("SELECT deleted_at, withdrawn FROM document WHERE id = %s", (document_id,)).fetchone()
+        counts = connection.execute(
+            """
+            SELECT
+                (SELECT count(*) FROM document_revision WHERE document_id = %s),
+                (SELECT count(*) FROM chunk WHERE revision_id IN
+                    (SELECT id FROM document_revision WHERE document_id = %s)),
+                (SELECT count(*) FROM publication WHERE document_id = %s),
+                (SELECT octet_length(source_bytes)
+                 FROM ingestion_job WHERE namespace_id = (SELECT id FROM namespace WHERE name = %s)),
+                (SELECT result_revision_id IS NULL
+                 FROM ingestion_job WHERE namespace_id = (SELECT id FROM namespace WHERE name = %s))
+            """,
+            (document_id, document_id, document_id, namespace, namespace),
+        ).fetchone()
     assert deleted_at is not None
     assert withdrawn is True
+    assert counts == (0, 0, 0, 0, True)

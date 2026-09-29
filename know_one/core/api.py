@@ -1271,6 +1271,21 @@ class KnowOne:
                 """,
                 (document_id,),
             )
+            # 立即清理正文和索引；Document、回执与审计保留删除状态。
+            connection.execute(
+                """
+                UPDATE ingestion_job SET source_bytes = ''::bytea, source_snapshot = '{}'::jsonb,
+                    source_ref = 'deleted', result_revision_id = NULL
+                WHERE namespace_id = %s AND source_key = (
+                    SELECT source_key FROM document WHERE id = %s
+                )
+                """,
+                (document["namespace_id"], document_id),
+            )
+            connection.execute("DELETE FROM publication WHERE document_id = %s", (document_id,))
+            connection.execute("DELETE FROM chunk WHERE revision_id IN (SELECT id FROM document_revision WHERE document_id = %s)", (document_id,))
+            connection.execute("DELETE FROM revision_index_build WHERE revision_id IN (SELECT id FROM document_revision WHERE document_id = %s)", (document_id,))
+            connection.execute("DELETE FROM document_revision WHERE document_id = %s", (document_id,))
             connection.execute(
                 """
                 INSERT INTO operation_receipt (
