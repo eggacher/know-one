@@ -1248,6 +1248,39 @@ class KnowOne:
                 score = 1 / (60 + rank) + (existing[1] if existing else 0.0)
                 fused[row["chunk_id"]] = (row, score)
         ranked_rows = sorted(fused.values(), key=lambda item: -item[1])[:top_k]
+        if ranked_rows:
+            with self._connect() as connection:
+                valid_rows = connection.execute(
+                    """
+                    SELECT chunk.id
+                    FROM chunk
+                    JOIN namespace ON namespace.id = chunk.namespace_id
+                    JOIN revision_index_build AS build
+                      ON build.revision_id = chunk.revision_id
+                     AND build.index_generation_id = chunk.index_generation_id
+                    JOIN document_revision AS revision ON revision.id = chunk.revision_id
+                    JOIN document ON document.id = revision.document_id
+                    JOIN publication ON publication.revision_id = revision.id
+                                     AND publication.document_id = document.id
+                    WHERE namespace.name = %s
+                      AND chunk.index_generation_id = namespace.current_index_generation_id
+                      AND build.status = 'ready'
+                      AND document.withdrawn = false AND document.deleted_at IS NULL
+                      AND document.acl @> jsonb_build_object('principals', jsonb_build_array(%s::text))
+                      AND document.applicability <@ %s::jsonb
+                      AND publication.valid_from <= %s
+                      AND (publication.valid_until IS NULL OR %s < publication.valid_until)
+                      AND chunk.id = ANY(%s)
+                    """,
+                    (
+                        namespace, access_scope.principal_id, Jsonb(applicability), at, at,
+                        [row["chunk_id"] for row, _ in ranked_rows],
+                    ),
+                ).fetchall()
+            valid_chunk_ids = {row["id"] for row in valid_rows}
+            ranked_rows = [
+                item for item in ranked_rows if item[0]["chunk_id"] in valid_chunk_ids
+            ]
         return RetrievalResult(
             evidence=tuple(
                 Evidence(
