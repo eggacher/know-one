@@ -59,10 +59,11 @@ python -m pip install -e '.[dev]'
 cp .env.example .env
 python -m pytest -q
 docker compose up -d db
-python -m know_one init-db --dsn postgresql://knowone:knowone@localhost:5432/knowone
+python -m know_one init-db
+python -m know_one create-namespace game-a-cs
 ```
 
-`know_one/model/__init__.py` 定义公开数据类型，`know_one/core/api.py` 定义 `KnowOne` 业务门面；`python -m know_one --help` 可查看本地管理命令。复制 [`.env.example`](.env.example) 为 `.env` 后可统一设置 `KNOWONE_DSN`、`KNOWONE_EMBEDDING_ENDPOINT`、`KNOWONE_EMBEDDING_MODEL` 和 `KNOWONE_EMBEDDING_DIMENSIONS`。默认模型为 `Qwen/Qwen3-Embedding-0.6B`、1024 维；显式参数和进程环境变量优先于 `.env`。当前 M1 尚未调用 embedding，模型配置会在接入 IndexGeneration 与向量化时生效。`init-db` 使用 `know_one/storage/schema.sql` 初始化空数据库，只应执行一次。已有旧 schema 的开发库需先人工审阅并执行 `know_one/storage/migrations/0001_persist_ingestion_source.sql`；该迁移拒绝为旧任务伪造来源快照。
+`know_one/model/__init__.py` 定义公开数据类型，`know_one/core/api.py` 定义 `KnowOne` 业务门面；`python -m know_one --help` 可查看本地管理命令。复制 [`.env.example`](.env.example) 为 `.env` 后可统一设置 `KNOWONE_DSN`、`KNOWONE_EMBEDDING_ENDPOINT`、`KNOWONE_EMBEDDING_MODEL` 和 `KNOWONE_EMBEDDING_DIMENSIONS`。默认模型为 `Qwen/Qwen3-Embedding-0.6B`、1024 维；显式参数和进程环境变量优先于 `.env`。`create-namespace` 会将当前模型、维度和切块配置冻结到首个 active IndexGeneration。`init-db` 使用 `know_one/storage/schema.sql` 初始化空数据库，只应执行一次。已有旧 schema 的开发库需先人工审阅并执行 `know_one/storage/migrations/0001_persist_ingestion_source.sql`；该迁移拒绝为旧任务伪造来源快照。
 
 ## 文档入口
 

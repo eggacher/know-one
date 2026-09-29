@@ -12,6 +12,14 @@ def test_help_is_available(capsys: pytest.CaptureFixture[str]) -> None:
     assert "init-db" in capsys.readouterr().out
 
 
+def test_help_lists_namespace_setup_command(capsys: pytest.CaptureFixture[str]) -> None:
+    """无需手工插表即可准备入库所需的 Namespace 与索引代。"""
+    with pytest.raises(SystemExit):
+        main(["--help"])
+
+    assert "create-namespace" in capsys.readouterr().out
+
+
 def test_init_db_requires_a_connection_string(
     capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch, tmp_path
 ) -> None:

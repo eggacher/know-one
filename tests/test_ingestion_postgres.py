@@ -9,6 +9,7 @@ import psycopg
 import pytest
 
 from know_one import AccessScope, KnowOne
+from know_one.cli import create_namespace
 from know_one.ingestion import TextSource
 
 
@@ -25,23 +26,8 @@ def test_plain_text_ingestion_creates_ready_revision_and_chunks(
     dsn: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """纯文本提交后，任务、Revision、构建记录和段落 Chunk 应完整关联。"""
-    namespace_id, generation_id = uuid4(), uuid4()
     namespace = f"test-{uuid4()}"
-    with psycopg.connect(dsn) as connection:
-        connection.execute("INSERT INTO namespace (id, name) VALUES (%s, %s)", (namespace_id, namespace))
-        connection.execute(
-            """
-            INSERT INTO index_generation (
-                id, namespace_id, config_fingerprint, embedding_model,
-                tokenizer_version, dims, distance, status
-            ) VALUES (%s, %s, 'test', 'Qwen/Qwen3-Embedding-0.6B', 'test', 1024, 'cosine', 'active')
-            """,
-            (generation_id, namespace_id),
-        )
-        connection.execute(
-            "UPDATE namespace SET current_index_generation_id = %s WHERE id = %s",
-            (generation_id, namespace_id),
-        )
+    generation_id = create_namespace(dsn, namespace)
 
     scope = AccessScope("tester", frozenset({namespace}), frozenset({"ingest"}))
     kb = KnowOne(dsn)
