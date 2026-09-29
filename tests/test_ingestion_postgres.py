@@ -9,7 +9,13 @@ from uuid import uuid4
 import psycopg
 import pytest
 
-from know_one import AccessScope, InvalidArgument, KnowOne
+from know_one import (
+    AccessScope,
+    ConcurrentModification,
+    IdempotencyConflict,
+    InvalidArgument,
+    KnowOne,
+)
 from know_one.cli import create_namespace
 from know_one.ingestion import TextSource
 
@@ -232,3 +238,60 @@ def test_publish_appends_a_window_and_replays_the_same_idempotency_key(
         (second_revision, second_from, None),
     ]
     assert state_generation == (2,)
+
+
+def test_publish_rejects_incomplete_build_stale_state_and_conflicting_replay(
+    dsn: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """发布必须以当前代完整构建、未过期状态代数和同一请求指纹为前提。"""
+    namespace = f"test-{uuid4()}"
+    generation_id = create_namespace(dsn, namespace)
+    scope = AccessScope("editor", frozenset({namespace}), frozenset({"ingest", "publish"}))
+    kb = KnowOne(dsn)
+    monkeypatch.setattr(
+        "know_one.core.api.OpenAIEmbeddingClient.embed",
+        lambda _client, texts: [[0.01] * 1024 for _ in texts],
+    )
+    ref = kb.ingest(TextSource("待发布内容。"), namespace, "manual", scope, "ingest-request")
+    kb.process_job(ref.job_id)
+    revision_id = kb.get_ingestion(ref.job_id, scope).revision_id
+    assert revision_id is not None
+    valid_from = datetime(2026, 9, 1, tzinfo=UTC)
+
+    with psycopg.connect(dsn) as connection, connection.transaction():
+        connection.execute(
+            """
+            UPDATE revision_index_build
+            SET status = 'building', expected_chunk_count = NULL,
+                completed_chunk_count = 0, completed_at = NULL
+            WHERE revision_id = %s AND index_generation_id = %s
+            """,
+            (revision_id, generation_id),
+        )
+    with pytest.raises(InvalidArgument, match="尚未在当前"):
+        kb.publish(revision_id, namespace, valid_from, None, 0, scope, "incomplete-build")
+
+    with psycopg.connect(dsn) as connection, connection.transaction():
+        connection.execute(
+            """
+            UPDATE revision_index_build
+            SET status = 'ready', expected_chunk_count = 1,
+                completed_chunk_count = 1, completed_at = now()
+            WHERE revision_id = %s AND index_generation_id = %s
+            """,
+            (revision_id, generation_id),
+        )
+    kb.publish(revision_id, namespace, valid_from, None, 0, scope, "publish-request")
+
+    with pytest.raises(ConcurrentModification):
+        kb.publish(revision_id, namespace, valid_from, None, 0, scope, "stale-state")
+    with pytest.raises(IdempotencyConflict):
+        kb.publish(
+            revision_id,
+            namespace,
+            datetime(2026, 9, 2, tzinfo=UTC),
+            None,
+            1,
+            scope,
+            "publish-request",
+        )
