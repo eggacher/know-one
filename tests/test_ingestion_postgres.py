@@ -80,7 +80,9 @@ def test_markdown_ingestion_preserves_heading_paths_and_source_ranges(
     """Markdown 标题不进入正文 Chunk，但为后续段落提供可追溯的标题路径。"""
     namespace = f"test-{uuid4()}"
     create_namespace(dsn, namespace)
-    scope = AccessScope("tester", frozenset({namespace}), frozenset({"ingest"}))
+    scope = AccessScope(
+        "tester", frozenset({namespace}), frozenset({"ingest", "publish", "read"})
+    )
     source = MarkdownSource("# 账户\n账户总览。\n\n## 密码\n忘记密码后请重置。")
     monkeypatch.setattr(
         "know_one.core.api.OpenAIEmbeddingClient.embed",
@@ -104,6 +106,33 @@ def test_markdown_ingestion_preserves_heading_paths_and_source_ranges(
     assert chunks == [
         ("账户总览。", ["账户"], {"char_end": 10, "char_start": 5}),
         ("忘记密码后请重置。", ["账户", "密码"], {"char_end": 27, "char_start": 18}),
+    ]
+
+    kb.publish(
+        revision_id,
+        namespace,
+        datetime(2026, 9, 1, tzinfo=UTC),
+        None,
+        0,
+        scope,
+        "publish",
+    )
+    result = kb.retrieve(
+        "忘记密码后请重置", namespace, scope, at=datetime(2026, 9, 2, tzinfo=UTC), top_k=1
+    )
+    assert [(evidence.text, evidence.heading_path) for evidence in result.evidence] == [
+        ("忘记密码后请重置。", ("账户", "密码"))
+    ]
+
+    rebuilt_kb = KnowOne(dsn, embedding_model="markdown-test-v2")
+    generation_id = rebuilt_kb.create_index_generation(namespace)
+    rebuilt_kb.rebuild_index_generation(namespace, generation_id)
+    rebuilt_kb.activate_index_generation(namespace, generation_id)
+    rebuilt = rebuilt_kb.retrieve(
+        "忘记密码后请重置", namespace, scope, at=datetime(2026, 9, 2, tzinfo=UTC), top_k=1
+    )
+    assert [(evidence.text, evidence.heading_path) for evidence in rebuilt.evidence] == [
+        ("忘记密码后请重置。", ("账户", "密码"))
     ]
 
 
