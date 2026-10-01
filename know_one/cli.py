@@ -155,6 +155,20 @@ def _parser() -> argparse.ArgumentParser:
         default=os.environ.get("KNOWONE_DSN"),
         help="PostgreSQL 连接串；未提供时读取 KNOWONE_DSN",
     )
+    process_next_parser = subcommands.add_parser(
+        "process-next-job", help="领取并处理一条 queued 或租约已过期的入库任务"
+    )
+    process_next_parser.add_argument(
+        "--dsn",
+        default=os.environ.get("KNOWONE_DSN"),
+        help="PostgreSQL 连接串；未提供时读取 KNOWONE_DSN",
+    )
+    process_next_parser.add_argument(
+        "--lease-seconds",
+        type=int,
+        default=300,
+        help="本次任务的 worker 租约秒数，默认 300",
+    )
     activate_generation_parser = subcommands.add_parser(
         "activate-index-generation", help="原子切换已完整重建的 IndexGeneration"
     )
@@ -236,6 +250,23 @@ def main(argv: Sequence[str] | None = None) -> int:
         except (RuntimeError, ValueError, KnowOneError) as error:
             parser.error(str(error))
         print(f"IndexGeneration 已重建：{arguments.generation_id}")
+        return 0
+
+    if arguments.command == "process-next-job":
+        if not arguments.dsn:
+            parser.error("process-next-job 需要 --dsn 或 KNOWONE_DSN")
+        if arguments.lease_seconds <= 0:
+            parser.error("lease-seconds 必须大于 0")
+        try:
+            job_id = KnowOne(arguments.dsn).process_next_job(
+                lease_seconds=arguments.lease_seconds
+            )
+        except (RuntimeError, ValueError, KnowOneError) as error:
+            parser.error(str(error))
+        if job_id is None:
+            print("没有可处理的入库任务")
+        else:
+            print(f"入库任务已处理：{job_id}")
         return 0
 
     if arguments.command == "activate-index-generation":

@@ -56,6 +56,30 @@ source = PdfSource(Path("data/manual.pdf"), first_page=92, last_page=102)
 
 扫描件、图片和复杂表格不自动 OCR，解析失败时任务会明确失败而不会发布不完整内容。
 
+业务进程直接调用时，按当前已认证的身份构造 `AccessScope`，再把返回的
+Evidence 交给自己的回答层；不要让浏览器提交 `principal` 或 Scope。可先运行
+[`examples/query_evidence.py`](examples/query_evidence.py) 检查检索与引用：
+
+```bash
+PYTHONPATH=. .venv/bin/python examples/query_evidence.py \
+  --namespace rav4-smoke-pdf --principal evaluator \
+  --query "油枪自动跳枪后还要继续加油吗？" --deadline-ms 15000
+```
+
+输出 JSON 包含 Evidence 原文、`source_locator.page`、标题路径、版本与告警；示例不调用 LLM、也不生成回答。
+
+提交新 PDF 时可使用 [`examples/submit_pdf.py`](examples/submit_pdf.py)。该脚本只创建来源快照和 queued 入库任务，随后由 worker 构建，不能跳过审核自动发布：
+
+```bash
+PYTHONPATH=. .venv/bin/python examples/submit_pdf.py \
+  --namespace manuals --principal editor \
+  --source-key manual/rav4-2026 --pdf data/manual.pdf \
+  --first-page 92 --last-page 102 --idempotency-key rav4-pages-92-102-v1
+python -m know_one process-next-job
+```
+
+任务到 ready 后，读取其 `revision_id` 并使用受控 `publish` 命令发布；同一文件提交重试必须复用相同 `idempotency-key`。
+
 当前保留原始 query，不做 LLM 改写。检索时限定 Namespace、当前权限、发布状态、生效时间和业务适用范围，再执行向量与关键词召回及 RRF 融合；尚未实现 rerank。生成示例放在调用方；首版不实现 `answer()`。
 
 ## 起步选型

@@ -74,6 +74,28 @@ def test_plain_text_ingestion_creates_ready_revision_and_chunks(
     assert build == ("ready", 2, 2)
 
 
+def test_process_next_job_claims_queued_work_and_stops_cleanly_when_empty(
+    dsn: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """一次 worker 调度只处理一条任务，空队列不是异常。"""
+    namespace = f"test-{uuid4()}"
+    create_namespace(dsn, namespace)
+    scope = AccessScope("tester", frozenset({namespace}), frozenset({"ingest"}))
+    monkeypatch.setattr(
+        "know_one.core.api.OpenAIEmbeddingClient.embed",
+        lambda _client, texts, **_kwargs: [[0.01] * 1024 for _ in texts],
+    )
+    kb = KnowOne(dsn)
+    first = kb.ingest(TextSource("第一条任务。"), namespace, "first", scope, "first")
+    second = kb.ingest(TextSource("第二条任务。"), namespace, "second", scope, "second")
+
+    assert kb.process_next_job() == first.job_id
+    assert kb.get_ingestion(first.job_id, scope).status == "ready"
+    assert kb.get_ingestion(second.job_id, scope).status == "queued"
+    assert kb.process_next_job() == second.job_id
+    assert kb.process_next_job() is None
+
+
 def test_pdf_ingestion_records_raw_pdf_page_locator(
     dsn: str, monkeypatch: pytest.MonkeyPatch, tmp_path
 ) -> None:

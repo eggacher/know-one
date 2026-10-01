@@ -613,6 +613,41 @@ class KnowOne:
             self._mark_job_failed(job_id)
             raise
 
+    def process_next_job(self, *, lease_seconds: int = 300) -> str | None:
+        """领取并处理下一条可恢复的入库任务，空队列时返回 ``None``。
+
+        此入口只处理一条任务，供宿主的 cron、进程管理器或常驻 worker 循环调用。
+        候选选择跳过正被其他 worker 锁住的行；实际领取仍复用 ``process_job``
+        的行锁与 lease 检查，因此两个 worker 即使短暂看到同一候选，也只有一个
+        能在有效租约内开始处理。
+        """
+        if lease_seconds <= 0:
+            raise InvalidArgument("lease_seconds 必须大于 0")
+        with self._connect() as connection, connection.transaction():
+            job = connection.execute(
+                """
+                SELECT id
+                FROM ingestion_job
+                WHERE status = 'queued'
+                   OR (status = 'running' AND lease_expires_at <= now())
+                ORDER BY created_at, id
+                FOR UPDATE SKIP LOCKED
+                LIMIT 1
+                """
+            ).fetchone()
+        if job is None:
+            return None
+        job_id = str(job["id"])
+        try:
+            self.process_job(job_id, lease_seconds=lease_seconds)
+        except InvalidArgument as error:
+            # 选择事务提交后，另一 worker 可能已先领取该任务；这不是本 worker 的
+            # 处理失败，下一次调度会继续寻找剩余任务。
+            if str(error) in {"任务正在被其他 worker 处理", "任务状态 failed 不能被处理"}:
+                return None
+            raise
+        return job_id
+
     def _connect(self) -> psycopg.Connection:
         """创建一个短生命周期连接；M1 避免过早引入连接池配置。"""
         return psycopg.connect(self._dsn, row_factory=dict_row)
