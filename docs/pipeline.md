@@ -1,13 +1,13 @@
 # KnowOne 流水线
 
-状态：目标实现。发布与权限契约见 [contracts.md](contracts.md)，切块规则见 [chunking.md](chunking.md)。
+状态：M1 已实现纯文本、Markdown 和文本层 PDF 的来源快照、段落切块、embedding、中文全文／向量召回与 RRF 融合。本文其余清洗、词典、语义切块、查询扩展、rerank 和上下文补全内容为后续设计，不应误解为现有运行路径。发布与权限契约见 [contracts.md](contracts.md)，切块规则见 [chunking.md](chunking.md)。
 
 ## 入库：构建与发布分离
 
 ```text
 ingest → 持久任务
-       → 解析 → 保守清洗 → 结构／句子切块 → embedding + 全文字段
-       → 完整性校验 → ready → 人工预览 → publish
+       → 解析来源快照 → 段落／Markdown 标题路径／PDF 页边界切块 → embedding + 全文字段
+       → 完整性校验 → ready → publish
 失败 → failed / needs_review；已发布版本继续可用
 ```
 
@@ -33,13 +33,11 @@ ingest → 持久任务
 
 ```text
 校验 AccessScope、业务条件、at、deadline，捕获索引代次
-  → 保留原 query，生成受控扩展
-  → 并行召回：
+  → 保留原 query
+  → 召回：
       向量：query embedding → 有 Namespace / 权限 / 发布 / 时效 / 适用条件的查询
       关键词：统一分词 → 同样约束下的全文查询
   → 按 Chunk 去重、RRF 融合、限制候选预算
-  → rerank（原 query 与候选检索文本批量打分）
-  → 按需补充同 revision 上下文，合并重叠原文区间
   → 再校验当前 ACL / 撤回 / 发布状态 → Evidence + 运行信息
 ```
 
@@ -65,7 +63,7 @@ ingest → 持久任务
 
 RRF 按路径权重与名次累加 `weight / (60 + rank)`，不直接混合向量和全文分数。当前中文 smoke 基线下，向量权重为 1、全文权重为 0.25；该参数是受控实验起点，必须随评测结果调整。扩展词在各路内部处理，不能因为某一路生成更多子查询就无意获得额外权重。
 
-重排批量处理 query/候选对，限制候选数、输入长度及总时限，报告截断。按原文位置去重，避免 overlap 占满结果。长文按 [切块策略](chunking.md) 补充必要上下文，并再次执行相同授权和版本检查。
+重排批量处理 query/候选对，限制候选数、输入长度及总时限，报告截断。按原文位置去重，避免 overlap 占满结果。长文按 [切块策略](chunking.md) 补充必要上下文，并再次执行相同授权和版本检查。**当前未实现 rerank 与上下文补全，检索结果直接按 RRF 顺序返回。**
 
 首版不加入任意“新文档优先”的线性加分。官方性、产品版本、地区和渠道先成为来源准入或业务约束；跨文档冲突由运营处理。排序分数只表达模型相关度，不表示答案正确概率。
 
