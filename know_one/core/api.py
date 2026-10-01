@@ -23,6 +23,8 @@ from hashlib import sha256
 import json
 import os
 import re
+import subprocess
+import tempfile
 from time import monotonic
 from uuid import uuid4
 
@@ -43,6 +45,7 @@ from know_one.errors import (
     PublicationConflict,
     UnsupportedSource,
 )
+from know_one.full_text import FULL_TEXT_CONFIG_VERSION, build_or_tsquery, tokenize_text
 from know_one.model import (
     AccessScope,
     Evidence,
@@ -51,6 +54,13 @@ from know_one.model import (
     RetrievalResult,
     Source,
 )
+
+
+RETRIEVAL_CANDIDATE_LIMIT = 50
+# RAV4 smoke 显示中文全文词面相关性弱于向量语义召回；全文仅作为弱加分，
+# 以免同义问法下的词面候选挤掉已经命中的向量证据。
+FULL_TEXT_RRF_WEIGHT = 0.25
+VECTOR_RRF_WEIGHT = 1.0
 
 
 class KnowOne:
@@ -154,10 +164,11 @@ class KnowOne:
         self._validate_ingest_arguments(source, namespace, source_key, idempotency_key)
 
         source_bytes = source.snapshot()
-        try:
-            source_bytes.decode("utf-8")
-        except UnicodeDecodeError as error:
-            raise InvalidArgument("text/plain 来源必须是 UTF-8 编码") from error
+        if source.media_type != "application/pdf":
+            try:
+                source_bytes.decode("utf-8")
+            except UnicodeDecodeError as error:
+                raise InvalidArgument("文本来源必须是 UTF-8 编码") from error
         if not source_bytes.strip():
             raise InvalidArgument("来源文本不能为空")
 
@@ -312,7 +323,7 @@ class KnowOne:
             "chunker": "m1-paragraph-v1",
             "embedding_model": self._embedding_model,
             "dimensions": self._embedding_dimensions,
-            "full_text": "postgres-simple-v1",
+            "full_text": FULL_TEXT_CONFIG_VERSION,
         }
         fingerprint = sha256(json.dumps(config, sort_keys=True).encode("utf-8")).hexdigest()
         generation_id = uuid4()
@@ -381,11 +392,12 @@ class KnowOne:
                 raise InvalidArgument("目标 IndexGeneration 与本地 embedding 配置不一致")
             revisions = connection.execute(
                 """
-                SELECT revision.id, source.source_bytes, source.source_media_type
+                SELECT revision.id, source.source_bytes, source.source_media_type,
+                       source.source_snapshot
                 FROM document_revision AS revision
                 JOIN document ON document.id = revision.document_id
                 JOIN LATERAL (
-                    SELECT source_bytes, source_media_type
+                    SELECT source_bytes, source_media_type, source_snapshot
                     FROM ingestion_job
                     WHERE result_revision_id = revision.id
                     ORDER BY created_at
@@ -398,7 +410,11 @@ class KnowOne:
             ).fetchall()
 
         for revision in revisions:
-            text = bytes(revision["source_bytes"]).decode("utf-8")
+            text = self._source_text(
+                bytes(revision["source_bytes"]),
+                revision["source_media_type"],
+                revision["source_snapshot"],
+            )
             chunks = self._chunks_for_media_type(text, revision["source_media_type"])
             if not chunks:
                 raise InvalidArgument("Revision 原文中没有可切分的文本段落")
@@ -407,7 +423,8 @@ class KnowOne:
                 self._embedding_endpoint, self._embedding_model, self._embedding_dimensions
             ).embed([chunk[0] for chunk in chunks])
             self._write_rebuilt_revision(
-                generation["namespace_id"], generation_id, revision["id"], chunks, vectors
+                generation["namespace_id"], generation_id, revision["id"], chunks, vectors,
+                revision["source_media_type"], text, revision["source_snapshot"],
             )
 
     def _write_rebuilt_revision(
@@ -417,6 +434,9 @@ class KnowOne:
         revision_id: object,
         chunks: list[tuple[str, int, int, tuple[str, ...]]],
         vectors: list[list[float]],
+        source_media_type: str,
+        source_text: str,
+        source_snapshot: dict[str, object],
     ) -> None:
         """在短事务中覆盖一个 Revision 在 building generation 中的草稿。"""
         with self._connect() as connection, connection.transaction():
@@ -466,6 +486,7 @@ class KnowOne:
             for ordinal, ((raw_text, start, end, heading_path), vector) in enumerate(
                 zip(chunks, vectors, strict=True)
             ):
+                search_text = tokenize_text(raw_text)
                 connection.execute(
                     """
                     INSERT INTO chunk (
@@ -476,9 +497,13 @@ class KnowOne:
                     """,
                     (
                         uuid4(), namespace_id, revision_id, generation_id, ordinal,
-                        raw_text, raw_text, list(heading_path),
-                        Jsonb({"char_start": start, "char_end": end}),
-                        "[" + ",".join(str(value) for value in vector) + "]", raw_text,
+                        raw_text, search_text, list(heading_path),
+                        Jsonb(
+                            self._source_locator(
+                                source_media_type, source_text, start, end, source_snapshot
+                            )
+                        ),
+                        "[" + ",".join(str(value) for value in vector) + "]", search_text,
                     ),
                 )
             connection.execute(
@@ -618,8 +643,8 @@ class KnowOne:
             raise InvalidArgument("namespace、source_key 和 idempotency_key 均不能为空")
         if len(source_key) > 512:
             raise InvalidArgument("source_key 不能超过 512 个字符")
-        if getattr(source, "media_type", None) not in {"text/plain", "text/markdown"}:
-            raise UnsupportedSource("仅支持 text/plain 和 text/markdown 来源")
+        if getattr(source, "media_type", None) not in {"text/plain", "text/markdown", "application/pdf"}:
+            raise UnsupportedSource("仅支持 text/plain、text/markdown 和 application/pdf 来源")
 
     @staticmethod
     def _fingerprint(source_key: str, content_hash: str, media_type: str) -> str:
@@ -772,7 +797,62 @@ class KnowOne:
             return cls._paragraphs(text)
         if media_type == "text/markdown":
             return cls._markdown_paragraphs(text)
+        if media_type == "application/pdf":
+            chunks = []
+            offset = 0
+            # form feed 是 pdftotext 的页边界；不得让段落跨页，否则 Evidence 无法
+            # 指向唯一页码。保留全局字符偏移以便回查冻结的提取文本。
+            for page in text.split("\f"):
+                for raw_text, start, end, heading_path in cls._paragraphs(page):
+                    chunks.append((raw_text, offset + start, offset + end, heading_path))
+                offset += len(page) + 1
+            return chunks
         raise UnsupportedSource(f"未注册的来源媒体类型：{media_type}")
+
+    @staticmethod
+    def _source_text(
+        source_bytes: bytes, media_type: str, source_snapshot: dict[str, object] | None = None
+    ) -> str:
+        """把冻结来源转换为可切块文本；PDF 固定使用 raw 阅读顺序。"""
+        if media_type != "application/pdf":
+            return source_bytes.decode("utf-8")
+        with tempfile.NamedTemporaryFile(suffix=".pdf") as source_file:
+            source_file.write(source_bytes)
+            source_file.flush()
+            try:
+                command = ["pdftotext", "-raw"]
+                # 页码范围随来源快照持久化，重建必须重放完全相同的 PDF 子集。
+                if source_snapshot and source_snapshot.get("first_page") is not None:
+                    command.extend(["-f", str(source_snapshot["first_page"])])
+                if source_snapshot and source_snapshot.get("last_page") is not None:
+                    command.extend(["-l", str(source_snapshot["last_page"])])
+                command.extend(["-enc", "UTF-8", source_file.name, "-"])
+                result = subprocess.run(
+                    command,
+                    check=True, capture_output=True, text=True,
+                )
+            except FileNotFoundError as error:
+                raise DependencyUnavailable("PDF 解析需要安装 pdftotext") from error
+            except subprocess.CalledProcessError as error:
+                raise InvalidArgument("PDF 文本层无法解析") from error
+        return result.stdout
+
+    @staticmethod
+    def _source_locator(
+        media_type: str,
+        text: str,
+        start: int,
+        end: int,
+        source_snapshot: dict[str, object] | None = None,
+    ) -> dict[str, int]:
+        """构造原文区间；PDF 额外记录 1 起始页码供人工回查。"""
+        locator = {"char_start": start, "char_end": end}
+        if media_type == "application/pdf":
+            first_page = 1
+            if source_snapshot and source_snapshot.get("first_page") is not None:
+                first_page = int(source_snapshot["first_page"])
+            locator["page"] = first_page + text.count("\f", 0, start)
+        return locator
 
     def _process_job(self, job_id: str, lease_seconds: int) -> None:
         """先领取任务并在事务外生成向量，再用短事务写入完整构建。"""
@@ -815,7 +895,9 @@ class KnowOne:
                 (lease_seconds, job_id),
             )
 
-        text = bytes(job["source_bytes"]).decode("utf-8")
+        text = self._source_text(
+            bytes(job["source_bytes"]), job["source_media_type"], job["source_snapshot"]
+        )
         chunks = self._chunks_for_media_type(text, job["source_media_type"])
         if not chunks:
             raise InvalidArgument("来源中没有可切分的文本段落")
@@ -923,6 +1005,7 @@ class KnowOne:
             for ordinal, ((raw_text, start, end, heading_path), vector) in enumerate(
                 zip(chunks, vectors, strict=True)
             ):
+                search_text = tokenize_text(raw_text)
                 connection.execute(
                     """
                     INSERT INTO chunk (
@@ -933,9 +1016,13 @@ class KnowOne:
                     """,
                     (
                         uuid4(), job["namespace_id"], revision_id, generation_id, ordinal,
-                        raw_text, raw_text, list(heading_path),
-                        Jsonb({"char_start": start, "char_end": end}),
-                        "[" + ",".join(str(value) for value in vector) + "]", raw_text,
+                        raw_text, search_text, list(heading_path),
+                        Jsonb(
+                            self._source_locator(
+                                job["source_media_type"], text, start, end, job["source_snapshot"]
+                            )
+                        ),
+                        "[" + ",".join(str(value) for value in vector) + "]", search_text,
                     ),
                 )
             connection.execute(
@@ -1424,6 +1511,7 @@ class KnowOne:
         applicability: dict | None = None,
         top_k: int = 8,
         deadline_ms: int = 3000,
+        recall_mode: str = "hybrid",
     ) -> RetrievalResult:
         """受约束的混合检索，返回可引用的 Evidence 列表。
 
@@ -1449,6 +1537,8 @@ class KnowOne:
                 文档声明而请求缺失时抛 InvalidArgument。
             top_k: 最多返回条数（建议 1–20，上限为部署配置）；不保证凑满。
             deadline_ms: 本次检索总预算（毫秒）；耗尽抛 DeadlineExceeded。
+            recall_mode: 召回候选来源；默认 hybrid 融合全文与向量，
+                full_text 和 vector 仅供受控诊断与评估使用。
         """
         self._require_permission(access_scope, namespace, "read")
         if not query.strip():
@@ -1457,6 +1547,8 @@ class KnowOne:
             raise InvalidArgument("top_k 必须在 1 到 20 之间")
         if deadline_ms <= 0:
             raise InvalidArgument("deadline_ms 必须大于 0")
+        if not isinstance(recall_mode, str) or recall_mode not in {"hybrid", "full_text", "vector"}:
+            raise InvalidArgument("recall_mode 必须是 hybrid、full_text 或 vector")
         deadline = monotonic() + deadline_ms / 1000
         at = at or datetime.now(UTC)
         _validate_timezone(at, field_name="at")
@@ -1495,16 +1587,19 @@ class KnowOne:
             if requires_applicability is not None:
                 raise InvalidArgument("存在声明 applicability 的 Document，请求必须提供条件")
         vector_rows = []
-        try:
-            # 模型调用位于数据库连接的事务之外，避免网络延迟持有数据库锁。
-            remaining_seconds = deadline - monotonic()
-            if remaining_seconds <= 0:
-                raise DeadlineExceeded("检索 deadline 已耗尽")
-            query_vector = OpenAIEmbeddingClient(
-                self._embedding_endpoint, active["embedding_model"], active["dims"]
-            ).embed([query], timeout_seconds=remaining_seconds)[0]
-        except (DependencyUnavailable, InvalidArgument):
-            query_vector = None
+        full_text_query = build_or_tsquery(query) if recall_mode != "vector" else None
+        query_vector = None
+        if recall_mode != "full_text":
+            try:
+                # 模型调用位于数据库连接的事务之外，避免网络延迟持有数据库锁。
+                remaining_seconds = deadline - monotonic()
+                if remaining_seconds <= 0:
+                    raise DeadlineExceeded("检索 deadline 已耗尽")
+                query_vector = OpenAIEmbeddingClient(
+                    self._embedding_endpoint, active["embedding_model"], active["dims"]
+                ).embed([query], timeout_seconds=remaining_seconds)[0]
+            except (DependencyUnavailable, InvalidArgument):
+                query_vector = None
         if monotonic() >= deadline:
             raise DeadlineExceeded("检索 deadline 已耗尽")
 
@@ -1520,8 +1615,10 @@ class KnowOne:
                 """SELECT embedding_model FROM index_generation WHERE id = %s""",
                 (namespace_row["current_index_generation_id"],),
             ).fetchone()
-            rows = connection.execute(
-                """
+            rows = []
+            if recall_mode != "vector" and full_text_query is not None:
+                rows = connection.execute(
+                    """
                 SELECT chunk.id AS chunk_id, chunk.raw_text, chunk.source_locator,
                        chunk.heading_path, revision.id AS revision_id, document.id AS document_id,
                        publication.valid_from, publication.valid_until
@@ -1541,16 +1638,17 @@ class KnowOne:
                   AND document.applicability <@ %s::jsonb
                   AND publication.valid_from <= %s
                   AND (publication.valid_until IS NULL OR %s < publication.valid_until)
-                  AND chunk.tsv @@ plainto_tsquery('simple', %s)
-                ORDER BY ts_rank_cd(chunk.tsv, plainto_tsquery('simple', %s)) DESC, chunk.ordinal
+                  AND chunk.tsv @@ to_tsquery('simple', %s)
+                ORDER BY ts_rank_cd(chunk.tsv, to_tsquery('simple', %s)) DESC, chunk.ordinal
                 LIMIT %s
-                """,
-                (
-                    namespace_row["id"], namespace_row["current_index_generation_id"],
-                    access_scope.principal_id, Jsonb(applicability), at, at, query, query, top_k,
-                ),
-            ).fetchall()
-            if query_vector is not None:
+                    """,
+                    (
+                        namespace_row["id"], namespace_row["current_index_generation_id"],
+                        access_scope.principal_id, Jsonb(applicability), at, at,
+                        full_text_query, full_text_query, RETRIEVAL_CANDIDATE_LIMIT,
+                    ),
+                ).fetchall()
+            if recall_mode != "full_text" and query_vector is not None:
                 vector_literal = "[" + ",".join(str(value) for value in query_vector) + "]"
                 vector_rows = connection.execute(
                     """
@@ -1578,16 +1676,20 @@ class KnowOne:
                     """,
                     (
                         namespace_row["id"], namespace_row["current_index_generation_id"],
-                        access_scope.principal_id, Jsonb(applicability), at, at, vector_literal, top_k,
+                        access_scope.principal_id, Jsonb(applicability), at, at,
+                        vector_literal, RETRIEVAL_CANDIDATE_LIMIT,
                     ),
                 ).fetchall()
         if monotonic() >= deadline:
             raise DeadlineExceeded("检索 deadline 已耗尽")
         fused: dict[object, tuple[dict, float]] = {}
-        for candidates in (rows, vector_rows):
+        for candidates, weight in (
+            (rows, FULL_TEXT_RRF_WEIGHT),
+            (vector_rows, VECTOR_RRF_WEIGHT),
+        ):
             for rank, row in enumerate(candidates, start=1):
                 existing = fused.get(row["chunk_id"])
-                score = 1 / (60 + rank) + (existing[1] if existing else 0.0)
+                score = weight / (60 + rank) + (existing[1] if existing else 0.0)
                 fused[row["chunk_id"]] = (row, score)
         ranked_rows = sorted(fused.values(), key=lambda item: -item[1])[:top_k]
         if ranked_rows:
@@ -1624,6 +1726,8 @@ class KnowOne:
             ranked_rows = [
                 item for item in ranked_rows if item[0]["chunk_id"] in valid_chunk_ids
             ]
+        score_type = "rrf" if recall_mode == "hybrid" else recall_mode
+        vector_unavailable = recall_mode != "full_text" and query_vector is None
         return RetrievalResult(
             evidence=tuple(
                 Evidence(
@@ -1631,13 +1735,13 @@ class KnowOne:
                     revision_id=str(row["revision_id"]), chunk_id=str(row["chunk_id"]),
                     source_locator=row["source_locator"], heading_path=tuple(row["heading_path"]),
                     publication_valid_from=row["valid_from"], publication_valid_until=row["valid_until"],
-                    rank_score=score,
+                    rank_score=score, score_type=score_type,
                 ) for row, score in ranked_rows
             ),
             index_generation=str(namespace_row["current_index_generation_id"]),
             model_version=generation["embedding_model"], trace_id=str(uuid4()),
-            degraded=query_vector is None,
-            warnings=("vector_retrieval_unavailable",) if query_vector is None else (),
+            degraded=vector_unavailable,
+            warnings=("vector_retrieval_unavailable",) if vector_unavailable else (),
         )
 
 

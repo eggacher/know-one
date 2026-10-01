@@ -14,6 +14,7 @@ from uuid import uuid4
 from know_one.config import load_local_env
 from know_one.core.api import KnowOne
 from know_one.errors import KnowOneError
+from know_one.full_text import FULL_TEXT_CONFIG_VERSION
 from know_one.model import AccessScope, PERMISSIONS
 
 
@@ -72,7 +73,7 @@ def create_namespace(dsn: str, name: str) -> str:
         "chunker": "m1-paragraph-v1",
         "embedding_model": model,
         "dimensions": dimensions,
-        "full_text": "postgres-simple-v1",
+        "full_text": FULL_TEXT_CONFIG_VERSION,
     }
     fingerprint = sha256(json.dumps(config, sort_keys=True).encode("utf-8")).hexdigest()
     try:

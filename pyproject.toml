@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "统一入库与检索能力的知识库业务模块"
 requires-python = ">=3.12"
 dependencies = [
+    "jieba==0.42.1",             # 中文全文检索的应用侧固定分词器
     "psycopg[binary]>=3.2",       # PostgreSQL 驱动（worker 批量场景用同步接口）
 ]
 
@@ -22,7 +23,7 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools.packages.find]
 include = ["know_one*"]
 
-# PDF 解析依赖外部 poppler 工具（pdftotext / pdftoppm）：
+# 文本层 PDF 解析依赖外部 poppler 工具（pdftotext）：
 #   macOS: brew install poppler
-# 这是有意选择：poppler 的 -bbox 模式给出词级坐标，是 rav4 实战验证过的方案，
-# 不引入 PyMuPDF 等重依赖（许可与行为差异另议）。
+# KnowOne 固定用 -raw 恢复阅读顺序；不引入 Python PDF 解析重依赖，
+# 扫描件、复杂表格和坐标级引用另行评估。

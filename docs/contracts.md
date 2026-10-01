@@ -57,7 +57,7 @@ delete(document_id, ...) 先使内容不可检索，再后台清理 Chunk、向�
 
 ## retrieve 与 Evidence
 
-retrieve(query, namespace, access_scope, at=None, applicability=..., top_k=8, deadline_ms=...) 返回 RetrievalResult。top_k 是最多返回条数，不保证凑满；首版建议允许 1–20，具体上限作为部署配置验证。
+retrieve(query, namespace, access_scope, at=None, applicability=..., top_k=8, deadline_ms=..., recall_mode="hybrid") 返回 RetrievalResult。top_k 是最多返回条数，不保证凑满；首版建议允许 1–20，具体上限作为部署配置验证。`recall_mode` 默认为 `hybrid`；`full_text` 和 `vector` 只用于受控诊断和评估，仍执行全部权限、发布、时效及适用条件过滤。
 
 结果字段：
 

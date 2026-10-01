@@ -2,7 +2,7 @@
 
 可嵌入 Python 业务系统的知识入库与检索库，首个落地场景是中文客服 FAQ 和公告。
 
-**当前状态：已具备纯文本与 Markdown 入库、IndexGeneration 重建切换、发布、受约束的全文/向量混合检索，以及 Document 撤回、ACL 更新和立即删除。PDF/HTML 解析与重排尚未实现，也没有商用性能或质量验证。**
+**当前状态：已具备纯文本、Markdown 与文本层 PDF 入库、IndexGeneration 重建切换、发布、受约束的全文/向量混合检索，以及 Document 撤回、ACL 更新和立即删除。HTML 解析与重排尚未实现，也没有商用性能或质量验证。**
 
 ## 范围与职责
 
@@ -41,6 +41,20 @@ result = kb.retrieve(query="怎么找回密码啊", namespace="game-a-cs",
 # result.evidence：原文、来源定位、revision、排序信息
 # result.degraded / warnings / trace_id：运行状态
 ```
+
+文本层 PDF 可通过 `PdfSource` 入库；页码范围会随原文快照保存，后续
+IndexGeneration 重建仍只处理相同页段，Evidence 的 `source_locator.page` 为原始
+PDF 页码。该能力依赖系统的 `pdftotext`；macOS 可执行 `brew install poppler`：
+
+```python
+from pathlib import Path
+
+from know_one.ingestion import PdfSource
+
+source = PdfSource(Path("data/manual.pdf"), first_page=92, last_page=102)
+```
+
+扫描件、图片和复杂表格不自动 OCR，解析失败时任务会明确失败而不会发布不完整内容。
 
 原始 query 保留；改写仅做受控扩展。检索时限定 Namespace、当前权限、发布状态、生效时间和业务适用范围，再执行向量与关键词召回、RRF 和重排。生成示例放在调用方；首版不实现 `answer()`。
 

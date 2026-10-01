@@ -17,7 +17,7 @@ from know_one import (
     KnowOne,
 )
 from know_one.cli import create_namespace, main
-from know_one.ingestion import MarkdownSource, TextSource
+from know_one.ingestion import MarkdownSource, PdfSource, TextSource
 
 
 @pytest.fixture
@@ -72,6 +72,54 @@ def test_plain_text_ingestion_creates_ready_revision_and_chunks(
     assert chunks[0][1]["char_start"] == 0
     assert [chunk[2] for chunk in chunks] == [1024, 1024]
     assert build == ("ready", 2, 2)
+
+
+def test_pdf_ingestion_records_raw_pdf_page_locator(
+    dsn: str, monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """文本层 PDF 应经 worker 解析，并为每页 Chunk 保存可回查页码。"""
+    namespace = f"test-{uuid4()}"
+    create_namespace(dsn, namespace)
+    scope = AccessScope("tester", frozenset({namespace}), frozenset({"ingest"}))
+    pdf = tmp_path / "manual.pdf"
+    pdf.write_bytes(b"%PDF-test")
+    parsed_snapshots: list[dict[str, object]] = []
+
+    def source_text(
+        _bytes: bytes, _media_type: str, snapshot: dict[str, object]
+    ) -> str:
+        parsed_snapshots.append(snapshot)
+        return "第一页内容。\f第二页内容。"
+
+    monkeypatch.setattr("know_one.core.api.KnowOne._source_text", staticmethod(source_text))
+    monkeypatch.setattr(
+        "know_one.core.api.OpenAIEmbeddingClient.embed",
+        lambda _client, texts, **_kwargs: [[0.01] * 1024 for _ in texts],
+    )
+
+    kb = KnowOne(dsn)
+    job = kb.ingest(
+        PdfSource(pdf, first_page=92, last_page=93), namespace, "manual", scope, "pdf-ingest"
+    )
+    kb.process_job(job.job_id)
+    revision_id = kb.get_ingestion(job.job_id, scope).revision_id
+    assert revision_id is not None
+    with psycopg.connect(dsn) as connection:
+        rows = connection.execute(
+            "SELECT raw_text, source_locator FROM chunk WHERE revision_id = %s ORDER BY ordinal",
+            (revision_id,),
+        ).fetchall()
+    assert rows == [
+        ("第一页内容。", {"char_start": 0, "char_end": 6, "page": 92}),
+        ("第二页内容。", {"char_start": 7, "char_end": 13, "page": 93}),
+    ]
+    rebuilt_kb = KnowOne(dsn, embedding_model="pdf-test-v2")
+    generation_id = rebuilt_kb.create_index_generation(namespace)
+    rebuilt_kb.rebuild_index_generation(namespace, generation_id)
+    assert parsed_snapshots == [
+        {"source_name": "manual.pdf", "first_page": 92, "last_page": 93},
+        {"source_name": "manual.pdf", "first_page": 92, "last_page": 93},
+    ]
 
 
 def test_markdown_ingestion_preserves_heading_paths_and_source_ranges(
@@ -408,6 +456,117 @@ def test_retrieve_returns_published_chunk_from_active_generation(
     assert result.evidence[0].source_locator == {"char_start": 0, "char_end": 14}
 
 
+def test_retrieve_can_diagnose_full_text_and_vector_recall_independently(
+    dsn: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """评估可分别观察全文和向量候选，且两路仍受同一发布约束。"""
+    namespace = f"test-{uuid4()}"
+    create_namespace(dsn, namespace)
+    scope = AccessScope(
+        "reader", frozenset({namespace}), frozenset({"ingest", "publish", "read"})
+    )
+
+    def embed(_client: object, texts: list[str], **_kwargs: object) -> list[list[float]]:
+        """为语义候选和关键词候选构造可区分的确定性向量。"""
+        vectors = []
+        for text in texts:
+            vector = [0.0] * 1024
+            vector[0] = 1.0 if "语义" in text else 0.0
+            vectors.append(vector)
+        return vectors
+
+    monkeypatch.setattr("know_one.core.api.OpenAIEmbeddingClient.embed", embed)
+    kb = KnowOne(dsn)
+    revisions = []
+    for source_key, text in (("keyword", "关键词"), ("semantic", "语义专用文档。")):
+        job = kb.ingest(TextSource(text), namespace, source_key, scope, f"ingest-{source_key}")
+        kb.process_job(job.job_id)
+        revision_id = kb.get_ingestion(job.job_id, scope).revision_id
+        assert revision_id is not None
+        revisions.append(revision_id)
+    for index, revision_id in enumerate(revisions):
+        kb.publish(
+            revision_id,
+            namespace,
+            datetime(2026, 9, 1, tzinfo=UTC),
+            None,
+            0,
+            scope,
+            f"publish-{index}",
+        )
+
+    full_text = kb.retrieve(
+        "关键词",
+        namespace,
+        scope,
+        at=datetime(2026, 9, 2, tzinfo=UTC),
+        top_k=1,
+        recall_mode="full_text",
+    )
+    vector = kb.retrieve(
+        "语义询问",
+        namespace,
+        scope,
+        at=datetime(2026, 9, 2, tzinfo=UTC),
+        top_k=1,
+        recall_mode="vector",
+    )
+
+    assert [(evidence.text, evidence.score_type) for evidence in full_text.evidence] == [
+        ("关键词", "full_text")
+    ]
+    assert [(evidence.text, evidence.score_type) for evidence in vector.evidence] == [
+        ("语义专用文档。", "vector")
+    ]
+    with pytest.raises(InvalidArgument, match="recall_mode"):
+        kb.retrieve("关键词", namespace, scope, recall_mode="unknown")
+
+
+def test_full_text_retrieval_segments_chinese_natural_language_query(
+    dsn: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """全文检索应以中文词项召回，不能要求问题中的每个虚词都出现在原文。"""
+    namespace = f"test-{uuid4()}"
+    create_namespace(dsn, namespace)
+    scope = AccessScope(
+        "reader", frozenset({namespace}), frozenset({"ingest", "publish", "read"})
+    )
+    monkeypatch.setattr(
+        "know_one.core.api.OpenAIEmbeddingClient.embed",
+        lambda _client, texts, **_kwargs: [[0.01] * 1024 for _ in texts],
+    )
+    kb = KnowOne(dsn)
+    job = kb.ingest(
+        TextSource("轮胎漏气时不要继续驾驶车辆。"),
+        namespace,
+        "tire",
+        scope,
+        "ingest-tire",
+    )
+    kb.process_job(job.job_id)
+    revision_id = kb.get_ingestion(job.job_id, scope).revision_id
+    assert revision_id is not None
+    kb.publish(
+        revision_id,
+        namespace,
+        datetime(2026, 9, 1, tzinfo=UTC),
+        None,
+        0,
+        scope,
+        "publish-tire",
+    )
+
+    result = kb.retrieve(
+        "轮胎漏气还能继续开吗？",
+        namespace,
+        scope,
+        at=datetime(2026, 9, 2, tzinfo=UTC),
+        recall_mode="full_text",
+    )
+
+    assert [evidence.text for evidence in result.evidence] == ["轮胎漏气时不要继续驾驶车辆。"]
+
+
 def test_retrieve_excludes_acl_denied_withdrawn_and_outside_window_chunks(
     dsn: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -533,6 +692,53 @@ def test_retrieve_rrf_prioritizes_a_chunk_returned_by_both_paths(
     assert [evidence.text for evidence in result.evidence] == ["关键词命中。", "语义候选。"]
     assert result.evidence[0].score_type == "rrf"
     assert result.evidence[0].rank_score > result.evidence[1].rank_score
+
+
+def test_hybrid_uses_a_larger_candidate_pool_than_its_final_result(
+    dsn: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """全文第 2 名且向量第 1 名的证据，不应因 top_k=1 在融合前被截断。"""
+    namespace = f"test-{uuid4()}"
+    create_namespace(dsn, namespace)
+    scope = AccessScope("reader", frozenset({namespace}), frozenset({"ingest", "publish", "read"}))
+
+    def embed(_client: object, texts: list[str], **_kwargs: object) -> list[list[float]]:
+        """构造全文与向量排序不同的候选，覆盖融合前截断回归。"""
+        vectors = []
+        for text in texts:
+            vector = [0.0] * 1024
+            if text == "关键词":
+                vector[:2] = [1.0, 0.0]
+            elif "语义目标" in text:
+                vector[:2] = [1.0, 0.0]
+            elif "中间候选" in text:
+                vector[:2] = [0.8, 0.6]
+            else:
+                vector[:2] = [0.0, 1.0]
+            vectors.append(vector)
+        return vectors
+
+    monkeypatch.setattr("know_one.core.api.OpenAIEmbeddingClient.embed", embed)
+    kb = KnowOne(dsn)
+    revisions = []
+    for source_key, text in (
+        ("keyword", "关键词 关键词 关键词 普通内容。"),
+        ("target", "关键词语义目标。"),
+        ("middle", "中间候选。"),
+    ):
+        job = kb.ingest(TextSource(text), namespace, source_key, scope, f"ingest-{source_key}")
+        kb.process_job(job.job_id)
+        revision_id = kb.get_ingestion(job.job_id, scope).revision_id
+        assert revision_id is not None
+        revisions.append(revision_id)
+    for index, revision_id in enumerate(revisions):
+        kb.publish(revision_id, namespace, datetime(2026, 9, 1, tzinfo=UTC), None, 0, scope, f"publish-{index}")
+
+    result = kb.retrieve(
+        "关键词", namespace, scope, at=datetime(2026, 9, 2, tzinfo=UTC), top_k=1
+    )
+
+    assert [evidence.text for evidence in result.evidence] == ["关键词语义目标。"]
 
 
 def test_retrieve_filters_by_document_applicability(dsn: str, monkeypatch: pytest.MonkeyPatch) -> None:

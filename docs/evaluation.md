@@ -12,6 +12,25 @@
 
 覆盖简称、错别字、否定、错误码、表格、例外条款、跨段依据、新旧版本、地区／渠道差异、权限不足和完全无答案。关键样本双人复核并解决分歧；测试身份和受限文档应覆盖跨 Namespace 场景。
 
+### 中文检索 smoke 评估
+
+在构建商用 Golden Set 前，可用几十条人工确认的问题快速检查全文、向量和混合召回。标注集为 JSONL；每行包含稳定 `id`、`query`，以及至少一个可接受原文片段 `expected_any`：
+
+```json
+{"id":"rav4-maintenance-001","query":"保养周期怎么查","expected_any":["定期保养", "保养和维护"]}
+```
+
+准备好已发布的评估 Namespace 后，以具备 `read` 权限的本地评估身份运行：
+
+```bash
+python -m know_one.eval.smoke --dataset smoke.jsonl --namespace rav4 --principal evaluator \
+  --deadline-ms 15000
+```
+
+命令分别调用 `retrieve(..., recall_mode="full_text" | "vector" | "hybrid")`，输出每路命中数、命中率和漏检样本 ID。`--deadline-ms` 作用于每一条检索，而非整批评测。它只判断结果是否包含人工标注片段；比较时忽略空白字符，以适配 PDF 文本层的硬换行，不替代引用完整性、无答案或商用验收指标。
+
+需要诊断排序时，附加 `--include-miss-evidence`；报告只为漏检样本输出其候选原文，不应把该包含正文的报告提交到不具备资料访问权限的位置。
+
 ## 指标口径
 
 | 指标 | 定义与用途 |
