@@ -16,7 +16,12 @@ def test_smoke_cli_reports_each_recall_mode(
     dataset = tmp_path / "smoke.jsonl"
     dataset.write_text(
         json.dumps(
-            {"id": "manual-001", "query": "如何保养", "expected_any": ["定期保养"]},
+            {
+                "id": "manual-001",
+                "query": "如何保养",
+                "expected_any": ["定期保养"],
+                "expected_pages": [92],
+            },
             ensure_ascii=False,
         )
         + "\n",
@@ -42,7 +47,7 @@ def test_smoke_cli_reports_each_recall_mode(
                 document_id="document-1",
                 revision_id="revision-1",
                 chunk_id="chunk-1",
-                source_locator={"char_start": 0, "char_end": len(text)},
+                source_locator={"char_start": 0, "char_end": len(text), "page": 92},
                 publication_valid_from=datetime(2026, 9, 1, tzinfo=UTC),
                 publication_valid_until=None,
             )
@@ -124,3 +129,61 @@ def test_smoke_cli_can_include_evidence_for_missed_cases(
     report = json.loads(capsys.readouterr().out)
     for mode in ("full_text", "vector", "hybrid"):
         assert report["modes"][mode]["miss_evidence"] == {"manual-001": ["无关内容"]}
+
+
+def test_smoke_cli_treats_a_matching_text_on_the_wrong_pdf_page_as_a_miss(
+    tmp_path, capsys, monkeypatch
+) -> None:
+    """PDF 标注页码时，相同正文但错误的来源定位不能算作命中。"""
+    dataset = tmp_path / "smoke.jsonl"
+    dataset.write_text(
+        json.dumps(
+            {
+                "id": "manual-001",
+                "query": "如何保养",
+                "expected_any": ["定期保养"],
+                "expected_pages": [92],
+            },
+            ensure_ascii=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    class FakeKnowOne:
+        """返回正确正文但错误页码，覆盖引用定位回归。"""
+
+        def __init__(self, _dsn: str) -> None:
+            pass
+
+        def retrieve(self, *_args: object, **_kwargs: object) -> RetrievalResult:
+            text = "定期保养说明"
+            return RetrievalResult(
+                evidence=(
+                    Evidence(
+                        text=text,
+                        document_id="document-1",
+                        revision_id="revision-1",
+                        chunk_id="chunk-1",
+                        source_locator={"char_start": 0, "char_end": len(text), "page": 93},
+                        publication_valid_from=datetime(2026, 9, 1, tzinfo=UTC),
+                        publication_valid_until=None,
+                    ),
+                ),
+                index_generation="generation-1",
+                model_version="test-model",
+                trace_id="trace-1",
+            )
+
+    monkeypatch.setattr("know_one.eval.smoke.KnowOne", FakeKnowOne)
+
+    assert main(
+        [
+            "--dataset", str(dataset), "--namespace", "rav4", "--principal", "evaluator",
+            "--dsn", "postgresql://test",
+        ]
+    ) == 0
+
+    report = json.loads(capsys.readouterr().out)
+    for mode in ("full_text", "vector", "hybrid"):
+        assert report["modes"][mode]["miss_ids"] == ["manual-001"]

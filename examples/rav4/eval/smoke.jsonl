@@ -1,25 +1,25 @@
-{"id":"rav4-key-001","query":"钥匙电池一般能用多久？","expected_any":["标准电池使用寿命为 1 至 2 年"],"source":"keys-and-doors","pages":"92-102"}
-{"id":"rav4-key-002","query":"遥控钥匙失灵可能是什么原因？","expected_any":["无线遥控不能正常工作"],"source":"keys-and-doors","pages":"92-102"}
-{"id":"rav4-key-003","query":"钥匙快没电有什么表现？","expected_any":["检测区域变小","钥匙表面的 LED 指示灯不点亮"],"source":"keys-and-doors","pages":"92-102"}
-{"id":"rav4-key-004","query":"电子钥匙没电时怎么开车门？","expected_any":["需要使用机械钥匙"],"source":"keys-and-doors","pages":"92-102"}
-{"id":"rav4-key-005","query":"电子钥匙能放在电磁炉旁边吗？","expected_any":["不要将其置于距下列可产生磁场"],"source":"keys-and-doors","pages":"92-102"}
-{"id":"rav4-key-006","query":"无线遥控会被什么干扰？","expected_any":["靠近电视塔、发电站、加油站"],"source":"keys-and-doors","pages":"92-102"}
-{"id":"rav4-door-001","query":"车门锁住后马上还能解锁吗？","expected_any":["车门锁止后 3 秒内无法解锁"],"source":"keys-and-doors","pages":"92-102"}
-{"id":"rav4-wiper-001","query":"玻璃干的时候可以开雨刷吗？","expected_any":["不要使用刮水器"],"source":"wipers-and-fuel","pages":"158-162"}
-{"id":"rav4-wiper-002","query":"什么时候能用风挡喷洗器？","expected_any":["发动机开关置于 ON"],"source":"wipers-and-fuel","pages":"158-162"}
-{"id":"rav4-wiper-003","query":"喷洗液用完了还能一直按吗？","expected_any":["不要连续操作该开关"],"source":"wipers-and-fuel","pages":"158-162"}
-{"id":"rav4-wiper-004","query":"雨刷喷嘴堵了能用针通吗？","expected_any":["不要尝试用针或其他工具疏通喷嘴"],"source":"wipers-and-fuel","pages":"158-162"}
-{"id":"rav4-fuel-001","query":"加油前为什么要先释放静电？","expected_any":["静电放电产生的火花可能点燃燃油蒸汽"],"source":"wipers-and-fuel","pages":"158-162"}
-{"id":"rav4-fuel-002","query":"油枪自动跳枪后还要继续加油吗？","expected_any":["停止向燃油箱加注燃油"],"source":"wipers-and-fuel","pages":"158-162"}
-{"id":"rav4-fuel-003","query":"加油时能抽烟吗？","expected_any":["给车辆加注燃油时不要吸烟"],"source":"wipers-and-fuel","pages":"158-162"}
-{"id":"rav4-fuel-004","query":"怎么防止加错油？","expected_any":["只能容纳无铅燃油泵的专用加油枪"],"source":"wipers-and-fuel","pages":"158-162"}
-{"id":"rav4-fuse-001","query":"保险丝又烧了该怎么办？","expected_any":["联系丰田经销店等对车辆进行检查"],"source":"fuses-and-bulbs","pages":"348-352"}
-{"id":"rav4-fuse-002","query":"能不能用导线临时代替保险丝？","expected_any":["切勿用导线代替保险丝"],"source":"fuses-and-bulbs","pages":"348-352"}
-{"id":"rav4-fuse-003","query":"保险丝的额定安培值从哪里看？","expected_any":["保险丝盒盖上查看额定安培值"],"source":"fuses-and-bulbs","pages":"348-352"}
-{"id":"rav4-fuse-004","query":"怎么判断保险丝烧了？","expected_any":["检查保险丝是否已熔断"],"source":"fuses-and-bulbs","pages":"348-352"}
-{"id":"rav4-tire-001","query":"轮胎漏气还能继续开吗？","expected_any":["轮胎漏气时不要继续驾驶车辆"],"source":"emergency-tire","pages":"376-383"}
-{"id":"rav4-tire-002","query":"换备胎之前车应该停在哪里？","expected_any":["将车辆安全停放在坚硬平坦的路面上"],"source":"emergency-tire","pages":"376-383"}
-{"id":"rav4-tire-003","query":"换轮胎时要拉手刹吗？","expected_any":["施加驻车制动"],"source":"emergency-tire","pages":"376-383"}
-{"id":"rav4-tire-004","query":"车轮螺母要拧多紧？","expected_any":["103 N•m"],"source":"emergency-tire","pages":"376-383"}
-{"id":"rav4-tire-005","query":"紧凑型备胎能长期使用吗？","expected_any":["仅在紧急情况下临时使用紧凑型备胎"],"source":"emergency-tire","pages":"376-383"}
-{"id":"rav4-tire-006","query":"换轮胎时能把车顶得很高吗？","expected_any":["不要将车辆顶起至不必要的高度"],"source":"emergency-tire","pages":"376-383"}
+{"id":"rav4-key-001","query":"钥匙电池一般能用多久？","expected_any":["标准电池使用寿命为 1 至 2 年"],"expected_pages":[92],"source":"keys-and-doors"}
+{"id":"rav4-key-002","query":"遥控钥匙失灵可能是什么原因？","expected_any":["无线遥控不能正常工作"],"expected_pages":[92,99],"source":"keys-and-doors"}
+{"id":"rav4-key-003","query":"钥匙快没电有什么表现？","expected_any":["检测区域变小","钥匙表面的 LED 指示灯不点亮"],"expected_pages":[92],"source":"keys-and-doors"}
+{"id":"rav4-key-004","query":"电子钥匙没电时怎么开车门？","expected_any":["需要使用机械钥匙"],"expected_pages":[95],"source":"keys-and-doors"}
+{"id":"rav4-key-005","query":"电子钥匙能放在电磁炉旁边吗？","expected_any":["不要将其置于距下列可产生磁场"],"expected_pages":[93],"source":"keys-and-doors"}
+{"id":"rav4-key-006","query":"无线遥控会被什么干扰？","expected_any":["靠近电视塔、发电站、加油站"],"expected_pages":[94],"source":"keys-and-doors"}
+{"id":"rav4-door-001","query":"车门锁住后马上还能解锁吗？","expected_any":["车门锁止后 3 秒内无法解锁"],"expected_pages":[97],"source":"keys-and-doors"}
+{"id":"rav4-wiper-001","query":"玻璃干的时候可以开雨刷吗？","expected_any":["不要使用刮水器"],"expected_pages":[158,159],"source":"wipers-and-fuel"}
+{"id":"rav4-wiper-002","query":"什么时候能用风挡喷洗器？","expected_any":["发动机开关置于 ON"],"expected_pages":[158,160],"source":"wipers-and-fuel"}
+{"id":"rav4-wiper-003","query":"喷洗液用完了还能一直按吗？","expected_any":["不要连续操作该开关"],"expected_pages":[159,160],"source":"wipers-and-fuel"}
+{"id":"rav4-wiper-004","query":"雨刷喷嘴堵了能用针通吗？","expected_any":["不要尝试用针或其他工具疏通喷嘴"],"expected_pages":[159,160],"source":"wipers-and-fuel"}
+{"id":"rav4-fuel-001","query":"加油前为什么要先释放静电？","expected_any":["静电放电产生的火花可能点燃燃油蒸汽"],"expected_pages":[161],"source":"wipers-and-fuel"}
+{"id":"rav4-fuel-002","query":"油枪自动跳枪后还要继续加油吗？","expected_any":["停止向燃油箱加注燃油"],"expected_pages":[161],"source":"wipers-and-fuel"}
+{"id":"rav4-fuel-003","query":"加油时能抽烟吗？","expected_any":["给车辆加注燃油时不要吸烟"],"expected_pages":[161],"source":"wipers-and-fuel"}
+{"id":"rav4-fuel-004","query":"怎么防止加错油？","expected_any":["只能容纳无铅燃油泵的专用加油枪"],"expected_pages":[161],"source":"wipers-and-fuel"}
+{"id":"rav4-fuse-001","query":"保险丝又烧了该怎么办？","expected_any":["联系丰田经销店等对车辆进行检查"],"expected_pages":[350],"source":"fuses-and-bulbs"}
+{"id":"rav4-fuse-002","query":"能不能用导线临时代替保险丝？","expected_any":["切勿用导线代替保险丝"],"expected_pages":[351],"source":"fuses-and-bulbs"}
+{"id":"rav4-fuse-003","query":"保险丝的额定安培值从哪里看？","expected_any":["保险丝盒盖上查看额定安培值"],"expected_pages":[350],"source":"fuses-and-bulbs"}
+{"id":"rav4-fuse-004","query":"怎么判断保险丝烧了？","expected_any":["检查保险丝是否已熔断"],"expected_pages":[350],"source":"fuses-and-bulbs"}
+{"id":"rav4-tire-001","query":"轮胎漏气还能继续开吗？","expected_any":["轮胎漏气时不要继续驾驶车辆"],"expected_pages":[377],"source":"emergency-tire"}
+{"id":"rav4-tire-002","query":"换备胎之前车应该停在哪里？","expected_any":["将车辆安全停放在坚硬平坦的路面上"],"expected_pages":[377],"source":"emergency-tire"}
+{"id":"rav4-tire-003","query":"换轮胎时要拉手刹吗？","expected_any":["施加驻车制动"],"expected_pages":[377,379],"source":"emergency-tire"}
+{"id":"rav4-tire-004","query":"车轮螺母要拧多紧？","expected_any":["103 N•m"],"expected_pages":[381,382],"source":"emergency-tire"}
+{"id":"rav4-tire-005","query":"紧凑型备胎能长期使用吗？","expected_any":["仅在紧急情况下临时使用紧凑型备胎"],"expected_pages":[382],"source":"emergency-tire"}
+{"id":"rav4-tire-006","query":"换轮胎时能把车顶得很高吗？","expected_any":["不要将车辆顶起至不必要的高度"],"expected_pages":[379],"source":"emergency-tire"}

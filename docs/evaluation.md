@@ -14,10 +14,10 @@
 
 ### 中文检索 smoke 评估
 
-在构建商用 Golden Set 前，可用几十条人工确认的问题快速检查全文、向量和混合召回。标注集为 JSONL；每行包含稳定 `id`、`query`，以及至少一个可接受原文片段 `expected_any`：
+在构建商用 Golden Set 前，可用几十条人工确认的问题快速检查全文、向量和混合召回。标注集为 JSONL；每行包含稳定 `id`、`query`，以及至少一个可接受原文片段 `expected_any`。对于 PDF，可选 `expected_pages` 写入可接受的原始页码，命中时同时校验文本与 Evidence 页码：
 
 ```json
-{"id":"rav4-maintenance-001","query":"保养周期怎么查","expected_any":["定期保养", "保养和维护"]}
+{"id":"rav4-maintenance-001","query":"保养周期怎么查","expected_any":["定期保养", "保养和维护"],"expected_pages":[12]}
 ```
 
 准备好已发布的评估 Namespace 后，以具备 `read` 权限的本地评估身份运行：

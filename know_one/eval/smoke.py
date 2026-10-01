@@ -20,11 +20,12 @@ RECALL_MODES = ("full_text", "vector", "hybrid")
 
 @dataclass(frozen=True)
 class SmokeCase:
-    """一条人工确认的查询与可接受原文片段。"""
+    """一条人工确认的查询、可接受原文片段与可选引用页码。"""
 
     identifier: str
     query: str
     expected_any: tuple[str, ...]
+    expected_pages: tuple[int, ...] | None
 
 
 def _matches_expected(expected: str, evidence_text: str) -> bool:
@@ -43,6 +44,7 @@ def load_cases(path: Path) -> tuple[SmokeCase, ...]:
             identifier = value["id"]
             query = value["query"]
             expected_any = value["expected_any"]
+            expected_pages = value.get("expected_pages")
         except (json.JSONDecodeError, KeyError, TypeError) as error:
             raise ValueError(f"第 {line_number} 行不是有效的 smoke 样本") from error
         if (
@@ -53,12 +55,39 @@ def load_cases(path: Path) -> tuple[SmokeCase, ...]:
             or not isinstance(expected_any, list)
             or not expected_any
             or not all(isinstance(text, str) and text.strip() for text in expected_any)
+            or (
+                expected_pages is not None
+                and (
+                    not isinstance(expected_pages, list)
+                    or not expected_pages
+                    or not all(
+                        isinstance(page, int) and not isinstance(page, bool) and page > 0
+                        for page in expected_pages
+                    )
+                )
+            )
         ):
-            raise ValueError(f"第 {line_number} 行的 id、query 和 expected_any 必须非空")
-        cases.append(SmokeCase(identifier, query, tuple(expected_any)))
+            raise ValueError(f"第 {line_number} 行的 id、query、expected_any 和 expected_pages 无效")
+        cases.append(
+            SmokeCase(
+                identifier,
+                query,
+                tuple(expected_any),
+                tuple(expected_pages) if expected_pages is not None else None,
+            )
+        )
     if not cases:
         raise ValueError("标注集至少需要一条样本")
     return tuple(cases)
+
+
+def _matches_case(case: SmokeCase, evidence_text: str, source_locator: dict) -> bool:
+    """匹配正文后按需校验 PDF 页码，避免相似段落掩盖错误引用。"""
+    if not any(_matches_expected(expected, evidence_text) for expected in case.expected_any):
+        return False
+    if case.expected_pages is None:
+        return True
+    return source_locator.get("page") in case.expected_pages
 
 
 def evaluate(
@@ -89,9 +118,8 @@ def evaluate(
             )
             evidence_texts = tuple(evidence.text for evidence in result.evidence)
             if not any(
-                _matches_expected(expected, text)
-                for expected in case.expected_any
-                for text in evidence_texts
+                _matches_case(case, evidence.text, evidence.source_locator)
+                for evidence in result.evidence
             ):
                 miss_ids.append(case.identifier)
                 if include_miss_evidence:
