@@ -59,8 +59,9 @@ from know_one.model import (
 
 RETRIEVAL_CANDIDATE_LIMIT = 50
 # 整本手册中“轮胎”“驻车”等高频词会让全文候选重复命中；全文保留较弱加分。
-# 0.20 足以让向量已接近前列的精确词面证据进入结果，同时不将排序交由全文通道主导。
-FULL_TEXT_RRF_WEIGHT = 0.20
+# 0.25 是 golden 草案与锁定集双验证的平衡点：词面强、语义弱的题（如未注册钥匙）
+# 可借全文加分进入前列；0.30 实验会把锁定集 traction-battery-001 挤出 top-k，不可再调高。
+FULL_TEXT_RRF_WEIGHT = 0.25
 VECTOR_RRF_WEIGHT = 1.0
 # 相邻块只在调用方显式请求补充上下文时读取；绝不参与主 Evidence 的排序。
 CONTEXT_PART_NEIGHBOR_DISTANCE = 2

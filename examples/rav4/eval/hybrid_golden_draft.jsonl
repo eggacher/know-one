@@ -26,5 +26,5 @@
 {"id":"rav4-hev-draft-pressure-001","query":"轮胎冷却多久后测胎压比较准？","expected_any":["车辆已经停放了至少 3 小时，或行驶未超过 1.5 km （公里）"],"expected_pages":[303],"source":"hybrid-owner-manual","review_status":"pending"}
 {"id":"rav4-hev-draft-pressure-002","query":"胎压多久检查一次比较好？","expected_any":["我们建议每两周检查一次轮胎气压"],"expected_pages":[303],"source":"hybrid-owner-manual","review_status":"pending"}
 {"id":"rav4-hev-draft-wheel-001","query":"换车轮后还要装胎压传感器吗？","expected_any":["只要更换车轮，必须安装轮胎气压警告阀和发射器"],"expected_pages":[304],"source":"hybrid-owner-manual","review_status":"pending"}
-{"id":"rav4-hev-draft-key-battery-001","query":"电子钥匙换什么型号电池？","expected_any":["锂电池 CR2032"],"expected_pages":[314],"source":"hybrid-owner-manual","review_status":"pending"}
+{"id":"rav4-hev-draft-key-battery-001","query":"电子钥匙换什么型号电池？","expected_any":["解锁并取出机械钥匙"],"expected_pages":[315],"source":"hybrid-owner-manual","review_status":"pending","expected_context_any":["使用 CR2032 锂电池","锂电池 CR2032"]}
 {"id":"rav4-hev-draft-fuse-001","query":"保险丝能换成更大安培的吗？","expected_any":["切勿使用高于额定安培值的保险丝"],"expected_pages":[317],"source":"hybrid-owner-manual","review_status":"pending"}

@@ -6,7 +6,9 @@ import json
 from datetime import UTC, datetime
 from pathlib import Path
 
-from know_one import Evidence, RetrievalResult
+import pytest
+
+from know_one import ContextPart, Evidence, RetrievalResult
 from know_one.eval.smoke import load_cases, main
 
 
@@ -198,3 +200,113 @@ def test_smoke_cli_treats_a_matching_text_on_the_wrong_pdf_page_as_a_miss(
     report = json.loads(capsys.readouterr().out)
     for mode in ("full_text", "vector", "hybrid"):
         assert report["modes"][mode]["miss_ids"] == ["manual-001"]
+
+
+def test_smoke_cli_accepts_cross_chunk_answer_via_context_parts(
+    tmp_path, capsys, monkeypatch
+) -> None:
+    """跨块答案：主证据锚定后，答案原文允许由 context_parts 补全。
+
+    expected_context_any 是附加条件：主证据必须命中锚文本与页码，
+    且同一条主证据的补充上下文必须带出答案原文，二者缺一即判漏检。
+    """
+
+    dataset = tmp_path / "cross.jsonl"
+    dataset.write_text(
+        json.dumps(
+            {
+                "id": "cross-001",
+                "query": "电子钥匙换什么型号电池？",
+                "expected_any": ["解锁并取出机械钥匙"],
+                "expected_pages": [315],
+                "expected_context_any": ["锂电池 CR2032"],
+            },
+            ensure_ascii=False,
+        )
+        + "\n"
+        + json.dumps(
+            {
+                "id": "strict-002",
+                "query": "电子钥匙换什么型号电池？",
+                "expected_any": ["解锁并取出机械钥匙"],
+                "expected_pages": [315],
+                # 上下文必须真的带出答案，否则不允许借页码邻近蒙混过关。
+                "expected_context_any": ["原文不存在的句子"],
+            },
+            ensure_ascii=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    class FakeKnowOne:
+        """主证据锚定更换步骤，答案型号位于相邻补充原文。"""
+
+        instances: list["FakeKnowOne"] = []
+
+        def __init__(self, dsn: str) -> None:
+            assert dsn == "postgresql://test"
+            self.include_context_values: list[object] = []
+            type(self).instances.append(self)
+
+        def retrieve(self, query: str, namespace: str, access_scope, **kwargs: object) -> RetrievalResult:
+            self.include_context_values.append(kwargs.get("include_context"))
+            main_evidence = Evidence(
+                text="更换电池\n1 解锁并取出机械钥匙。",
+                document_id="document-1",
+                revision_id="revision-1",
+                chunk_id="chunk-1",
+                source_locator={"char_start": 0, "char_end": 20, "page": 315},
+                publication_valid_from=datetime(2026, 9, 1, tzinfo=UTC),
+                publication_valid_until=None,
+                context_parts=(
+                    ContextPart(
+                        text="准备下列物品：\n锂电池 CR2032",
+                        chunk_id="chunk-0",
+                        source_locator={"char_start": 0, "char_end": 10, "page": 314},
+                    ),
+                ),
+            )
+            return RetrievalResult(
+                evidence=(main_evidence,),
+                index_generation="generation-1",
+                model_version="test-model",
+                trace_id="trace-1",
+            )
+
+    monkeypatch.setattr("know_one.eval.smoke.KnowOne", FakeKnowOne)
+
+    assert main(
+        [
+            "--dataset", str(dataset), "--namespace", "rav4", "--principal", "evaluator",
+            "--dsn", "postgresql://test",
+        ]
+    ) == 0
+
+    fake_report = json.loads(capsys.readouterr().out)
+    for mode in ("full_text", "vector", "hybrid"):
+        assert fake_report["modes"][mode]["miss_ids"] == ["strict-002"]
+        assert fake_report["modes"][mode]["hits"] == 1
+    # 只要数据集出现跨块答案要求，检索就必须附带补充上下文。
+    assert set(FakeKnowOne.instances[0].include_context_values) == {True}
+
+
+def test_load_cases_rejects_malformed_expected_context_any(tmp_path) -> None:
+    """expected_context_any 必须是非空字符串列表，防止静默放宽判定。"""
+    dataset = tmp_path / "bad.jsonl"
+    dataset.write_text(
+        json.dumps(
+            {
+                "id": "bad-001",
+                "query": "如何保养",
+                "expected_any": ["定期保养"],
+                "expected_context_any": ["   "],
+            },
+            ensure_ascii=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="第 1 行"):
+        load_cases(dataset)

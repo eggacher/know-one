@@ -20,12 +20,18 @@ RECALL_MODES = ("full_text", "vector", "hybrid")
 
 @dataclass(frozen=True)
 class SmokeCase:
-    """一条人工确认的查询、可接受原文片段与可选引用页码。"""
+    """一条人工确认的查询、可接受原文片段与可选引用页码。
+
+    expected_context_any 用于跨块答案：主证据只锚定题干所在段落时，
+    答案原文必须出现在同一条主证据的补充上下文（context_parts）里，
+    两个条件同时满足才算命中，避免借页码邻近放宽判定。
+    """
 
     identifier: str
     query: str
     expected_any: tuple[str, ...]
     expected_pages: tuple[int, ...] | None
+    expected_context_any: tuple[str, ...] | None = None
 
 
 def _matches_expected(expected: str, evidence_text: str) -> bool:
@@ -45,6 +51,7 @@ def load_cases(path: Path) -> tuple[SmokeCase, ...]:
             query = value["query"]
             expected_any = value["expected_any"]
             expected_pages = value.get("expected_pages")
+            expected_context_any = value.get("expected_context_any")
         except (json.JSONDecodeError, KeyError, TypeError) as error:
             raise ValueError(f"第 {line_number} 行不是有效的 smoke 样本") from error
         if (
@@ -55,6 +62,17 @@ def load_cases(path: Path) -> tuple[SmokeCase, ...]:
             or not isinstance(expected_any, list)
             or not expected_any
             or not all(isinstance(text, str) and text.strip() for text in expected_any)
+            or (
+                expected_context_any is not None
+                and (
+                    not isinstance(expected_context_any, list)
+                    or not expected_context_any
+                    or not all(
+                        isinstance(text, str) and text.strip()
+                        for text in expected_context_any
+                    )
+                )
+            )
             or (
                 expected_pages is not None
                 and (
@@ -74,6 +92,7 @@ def load_cases(path: Path) -> tuple[SmokeCase, ...]:
                 query,
                 tuple(expected_any),
                 tuple(expected_pages) if expected_pages is not None else None,
+                tuple(expected_context_any) if expected_context_any is not None else None,
             )
         )
     if not cases:
@@ -81,13 +100,22 @@ def load_cases(path: Path) -> tuple[SmokeCase, ...]:
     return tuple(cases)
 
 
-def _matches_case(case: SmokeCase, evidence_text: str, source_locator: dict) -> bool:
-    """匹配正文后按需校验 PDF 页码，避免相似段落掩盖错误引用。"""
-    if not any(_matches_expected(expected, evidence_text) for expected in case.expected_any):
+def _matches_case(case: SmokeCase, evidence: Evidence) -> bool:
+    """匹配正文后按需校验页码与跨块答案，避免相似段落掩盖错误引用。"""
+    if not any(_matches_expected(expected, evidence.text) for expected in case.expected_any):
         return False
-    if case.expected_pages is None:
-        return True
-    return source_locator.get("page") in case.expected_pages
+    if case.expected_pages is not None and evidence.source_locator.get("page") not in case.expected_pages:
+        return False
+    if case.expected_context_any is not None:
+        # 跨块答案：锚定主证据后，其补充上下文必须带出答案原文。
+        part_texts = tuple(part.text for part in evidence.context_parts)
+        if not any(
+            _matches_expected(expected, part_text)
+            for expected in case.expected_context_any
+            for part_text in part_texts
+        ):
+            return False
+    return True
 
 
 def evaluate(
@@ -102,6 +130,8 @@ def evaluate(
     include_miss_evidence: bool = False,
 ) -> dict:
     """逐路执行受约束检索，返回可审阅的命中率和漏检样本 ID。"""
+    # 跨块答案需要补充上下文才能判定；主证据排序与数量不受其影响。
+    needs_context = any(case.expected_context_any is not None for case in cases)
     modes: dict[str, dict] = {}
     for recall_mode in RECALL_MODES:
         miss_ids: list[str] = []
@@ -115,12 +145,10 @@ def evaluate(
                 top_k=top_k,
                 deadline_ms=deadline_ms,
                 recall_mode=recall_mode,
+                include_context=needs_context,
             )
             evidence_texts = tuple(evidence.text for evidence in result.evidence)
-            if not any(
-                _matches_case(case, evidence.text, evidence.source_locator)
-                for evidence in result.evidence
-            ):
+            if not any(_matches_case(case, evidence) for evidence in result.evidence):
                 miss_ids.append(case.identifier)
                 if include_miss_evidence:
                     # 仅输出已经判定为漏检的候选，避免常规评测报告重复整批原文。
