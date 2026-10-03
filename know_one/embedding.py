@@ -29,8 +29,20 @@ class OpenAIEmbeddingClient:
         try:
             with urlopen(request, timeout=timeout_seconds) as response:  # noqa: S310 -- endpoint 由部署方配置
                 body = json.loads(response.read())
-        except (HTTPError, URLError, TimeoutError, json.JSONDecodeError) as error:
-            raise DependencyUnavailable("embedding 服务不可用或返回无效 JSON") from error
+        except HTTPError as error:
+            # 只保留短服务端摘要；它通常说明模型未加载、输入过长或网关限制，
+            # 但不能回显调用方提交的整批原文。
+            detail = error.read().decode("utf-8", errors="replace").strip().replace("\n", " ")[:300]
+            suffix = f"：{detail}" if detail else ""
+            raise DependencyUnavailable(f"embedding 服务返回 HTTP {error.code}{suffix}") from error
+        except TimeoutError as error:
+            raise DependencyUnavailable(
+                f"embedding 服务在 {timeout_seconds:g} 秒内超时"
+            ) from error
+        except URLError as error:
+            raise DependencyUnavailable(f"embedding 服务网络错误：{error.reason}") from error
+        except json.JSONDecodeError as error:
+            raise DependencyUnavailable(f"embedding 服务返回无效 JSON：{error.msg}") from error
         try:
             rows = sorted(body["data"], key=lambda item: item["index"])
             vectors = [item["embedding"] for item in rows]

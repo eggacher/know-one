@@ -4,9 +4,20 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime
+from pathlib import Path
 
 from know_one import Evidence, RetrievalResult
-from know_one.eval.smoke import main
+from know_one.eval.smoke import load_cases, main
+
+
+def test_hybrid_golden_draft_has_unique_parseable_cases() -> None:
+    """RAV4 草案应保持为可运行且 ID 不重复的人工复核输入。"""
+    path = Path(__file__).parents[1] / "examples" / "rav4" / "eval" / "hybrid_golden_draft.jsonl"
+
+    cases = load_cases(path)
+
+    assert len(cases) == 30
+    assert len({case.identifier for case in cases}) == len(cases)
 
 
 def test_smoke_cli_reports_each_recall_mode(

@@ -478,6 +478,58 @@ def test_retrieve_returns_published_chunk_from_active_generation(
     assert result.evidence[0].source_locator == {"char_start": 0, "char_end": 14}
 
 
+def test_retrieve_can_attach_adjacent_context_without_reordering_evidence(
+    dsn: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """补充上下文只附在主 Evidence 上，不得取代命中的可引用原文。"""
+    namespace = f"test-{uuid4()}"
+    create_namespace(dsn, namespace)
+    scope = AccessScope(
+        "reader", frozenset({namespace}), frozenset({"ingest", "publish", "read"})
+    )
+    monkeypatch.setattr(
+        "know_one.core.api.OpenAIEmbeddingClient.embed",
+        lambda _client, texts, **_kwargs: [[0.01] * 1024 for _ in texts],
+    )
+    kb = KnowOne(dsn)
+    ref = kb.ingest(
+        TextSource("前置说明。\n\n目标参数为 42。\n\n后续说明。"),
+        namespace,
+        "manual",
+        scope,
+        "ingest",
+    )
+    kb.process_job(ref.job_id)
+    revision_id = kb.get_ingestion(ref.job_id, scope).revision_id
+    assert revision_id is not None
+    kb.publish(
+        revision_id,
+        namespace,
+        datetime(2026, 9, 1, tzinfo=UTC),
+        None,
+        0,
+        scope,
+        "publish",
+    )
+
+    result = kb.retrieve(
+        "目标参数",
+        namespace,
+        scope,
+        at=datetime(2026, 9, 2, tzinfo=UTC),
+        top_k=1,
+        recall_mode="full_text",
+        include_context=True,
+    )
+
+    assert [evidence.text for evidence in result.evidence] == ["目标参数为 42。"]
+    assert [part.text for part in result.evidence[0].context_parts] == ["前置说明。", "后续说明。"]
+    assert [part.source_locator for part in result.evidence[0].context_parts] == [
+        {"char_start": 0, "char_end": 5},
+        {"char_start": 18, "char_end": 23},
+    ]
+
+
 def test_retrieve_can_diagnose_full_text_and_vector_recall_independently(
     dsn: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:

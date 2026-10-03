@@ -1,0 +1,5 @@
+{"id":"rav4-fuel-002","query":"油枪自动跳枪后还要继续加油吗？","expected_status":"answered","expected_pages":[178]}
+{"id":"rav4-wiper-003","query":"喷洗液用完了还能一直按吗？","expected_status":"answered","expected_pages":[176,177]}
+{"id":"rav4-fuse-002","query":"能不能用导线临时代替保险丝？","expected_status":"answered","expected_pages":[317]}
+{"id":"rav4-stock-001","query":"这辆 RAV4 的股票代码是什么？","expected_status":"insufficient_evidence"}
+{"id":"rav4-weather-001","query":"今天北京天气怎么样？","expected_status":"insufficient_evidence"}

@@ -65,3 +65,20 @@ def test_pdf_parser_uses_raw_reading_order_and_records_page_locator(monkeypatch)
         "char_end": len(text),
         "page": 93,
     }
+
+
+def test_pdf_chunking_ignores_page_headers_and_splits_long_sections() -> None:
+    """孤立页眉不应入库；超长页面应在小节处拆分且保持连续定位。"""
+    page = (
+        "390 8-3. 初始化\n\n"
+        + "跨接起动步骤。" * 100
+        + "\n■12 伏蓄电池电量耗尽时起动混合动力系统\n"
+        + "利用推车起动方式无法起动混合动力系统。"
+    )
+
+    chunks = KnowOne._chunks_for_media_type(page, "application/pdf")
+
+    assert all(chunk[0] != "390 8-3. 初始化" for chunk in chunks)
+    target = next(chunk for chunk in chunks if "利用推车起动方式" in chunk[0])
+    assert target[0].startswith("■12 伏蓄电池")
+    assert target[1:3] == (page.index("■12 伏蓄电池"), len(page))

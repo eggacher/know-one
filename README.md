@@ -80,6 +80,24 @@ python -m know_one process-next-job
 
 任务到 ready 后，读取其 `revision_id` 并使用受控 `publish` 命令发布；同一文件提交重试必须复用相同 `idempotency-key`。
 
+如需本地 LLM 回答，可运行 [`examples/answer_with_evidence.py`](examples/answer_with_evidence.py)。它使用 LM Studio 原生 `/api/v1/chat`，默认连接 `192.168.2.6:1234` 的 `qwen3.5-9b`；只在检索到 Evidence 时调用模型。模型以 `[证据 N]` 标记事实依据，脚本只返回这些实际引用的 Evidence，并从其 `source_locator` 构造权威页码。若模型判断资料不足，返回 `insufficient_evidence` 与空引用；若模型遗漏有效证据编号，返回 `uncited_answer`，不把未绑定回答交给调用方；检索本身为空时返回 `no_evidence`。可通过 `KNOWONE_ANSWER_BASE_URL`、`KNOWONE_ANSWER_MODEL` 与可选的 `KNOWONE_ANSWER_API_TOKEN` 覆盖本地配置：
+
+```bash
+PYTHONPATH=. .venv/bin/python examples/answer_with_evidence.py \
+  --namespace rav4-smoke-pdf --principal evaluator \
+  --query "油枪自动跳枪后还要继续加油吗？" --deadline-ms 15000
+```
+
+追加 `--stream` 时，脚本使用 LM Studio 的 SSE 流式协议输出 JSON Lines：模型先发出有效 `[证据 N]`，脚本随即输出带权威 locator 的 `verified_citation` 事件，之后的 `verified_text` 才逐增量出现。最后一行仍是完整的权威结果 JSON，调用方应以该行的 `status` 与 `citations` 决定是否正式展示或保存回答。
+
+业务侧的同步结果、流式事件、状态码与失败关闭规则见[调用方回答集成契约](docs/answer-integration.md)。
+
+部署前可先运行 [`examples/preflight.py`](examples/preflight.py)，它只读检查 PostgreSQL/pgvector/schema、`pdftotext`、embedding 和 LM Studio 目标模型，不会入库、发布或触发 LLM 生成：
+
+```bash
+PYTHONPATH=. .venv/bin/python examples/preflight.py
+```
+
 当前保留原始 query，不做 LLM 改写。检索时限定 Namespace、当前权限、发布状态、生效时间和业务适用范围，再执行向量与关键词召回及 RRF 融合；尚未实现 rerank。生成示例放在调用方；首版不实现 `answer()`。
 
 ## 起步选型

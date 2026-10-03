@@ -48,6 +48,7 @@ from know_one.errors import (
 from know_one.full_text import FULL_TEXT_CONFIG_VERSION, build_or_tsquery, tokenize_text
 from know_one.model import (
     AccessScope,
+    ContextPart,
     Evidence,
     IngestionJobRef,
     IngestionStatus,
@@ -57,10 +58,98 @@ from know_one.model import (
 
 
 RETRIEVAL_CANDIDATE_LIMIT = 50
-# RAV4 smoke 显示中文全文词面相关性弱于向量语义召回；全文仅作为弱加分，
-# 以免同义问法下的词面候选挤掉已经命中的向量证据。
-FULL_TEXT_RRF_WEIGHT = 0.25
+# 整本手册中“轮胎”“驻车”等高频词会让全文候选重复命中；全文保留较弱加分。
+# 0.20 足以让向量已接近前列的精确词面证据进入结果，同时不将排序交由全文通道主导。
+FULL_TEXT_RRF_WEIGHT = 0.20
 VECTOR_RRF_WEIGHT = 1.0
+# 相邻块只在调用方显式请求补充上下文时读取；绝不参与主 Evidence 的排序。
+CONTEXT_PART_NEIGHBOR_DISTANCE = 2
+CONTEXT_PART_LIMIT = 4
+# 本地 embedding 服务对整本手册的单次 432 Chunk 请求超过默认 30 秒预算；
+# 64 条在实际探针中稳定完成，同时保留足够吞吐，避免为每段单独发起请求。
+EMBEDDING_BATCH_SIZE = 64
+# 真实 PDF 的 64 个段落可累积到近 4 万字符并超过本地模型 30 秒预算；
+# 字符上限与条数上限共同约束单次请求，单段超限时仍单独提交以保留原文边界。
+EMBEDDING_BATCH_CHAR_LIMIT = 12_000
+# PDF 阅读顺序经常把整个页面排成一个段落。超过此长度时优先按手册小节切开，
+# 避免页面末尾的具体操作被页面开头的泛化说明稀释。
+PDF_CHUNK_MAX_CHARS = 400
+
+
+def _embedding_batches(texts: list[str]) -> list[list[str]]:
+    """按条数和字符数拆分文本，避免短文本探针掩盖长文请求超时。"""
+    batches: list[list[str]] = []
+    batch: list[str] = []
+    character_count = 0
+    for text in texts:
+        if batch and (
+            len(batch) == EMBEDDING_BATCH_SIZE
+            or character_count + len(text) > EMBEDDING_BATCH_CHAR_LIMIT
+        ):
+            batches.append(batch)
+            batch = []
+            character_count = 0
+        batch.append(text)
+        character_count += len(text)
+    if batch:
+        batches.append(batch)
+    return batches
+
+
+def _embed_one_batch(
+    client: OpenAIEmbeddingClient, batch: list[str], start: int
+) -> list[list[float]]:
+    """提交一个批次；仅在超时时二分重试，避免慢批次中止整个入库任务。"""
+    try:
+        return client.embed(batch)
+    except DependencyUnavailable as error:
+        # 网络不可用等故障不会因缩小请求而恢复，不能放大成大量无效请求。
+        # 超时则通常意味着该批正文的 token 密度或服务瞬时负载偏高，二分可保留已完成的前序批次。
+        if len(batch) > 1 and "超时" in str(error):
+            midpoint = len(batch) // 2
+            return _embed_one_batch(client, batch[:midpoint], start) + _embed_one_batch(
+                client, batch[midpoint:], start + midpoint
+            )
+        # 仅附加批次元数据，帮助定位模型上下文／网关限制，绝不记录正文。
+        raise DependencyUnavailable(
+            f"embedding 批次 start={start} chunks={len(batch)} chars={sum(map(len, batch))} 失败：{error}"
+        ) from error
+
+
+def _embed_texts_in_batches(client: OpenAIEmbeddingClient, texts: list[str]) -> list[list[float]]:
+    """按上限分批向 embedding 服务提交，保持输出与输入的顺序一一对应。"""
+    vectors: list[list[float]] = []
+    start = 0
+    for batch in _embedding_batches(texts):
+        vectors.extend(_embed_one_batch(client, batch, start))
+        start += len(batch)
+    return vectors
+
+
+def _fuse_rrf_candidates(
+    full_text_rows: list[dict], vector_rows: list[dict], *, top_k: int
+) -> list[tuple[dict, float]]:
+    """按 RRF 合并两路候选，并保留向量首位的语义锚点。"""
+    fused: dict[object, tuple[dict, float]] = {}
+    for candidates, weight in (
+        (full_text_rows, FULL_TEXT_RRF_WEIGHT),
+        (vector_rows, VECTOR_RRF_WEIGHT),
+    ):
+        for rank, row in enumerate(candidates, start=1):
+            existing = fused.get(row["chunk_id"])
+            score = weight / (60 + rank) + (existing[1] if existing else 0.0)
+            fused[row["chunk_id"]] = (row, score)
+    ranked = sorted(fused.values(), key=lambda item: -item[1])[:top_k]
+    if not vector_rows or top_k <= 0:
+        return ranked
+
+    # 全文高频词可能使多个泛化段落叠加得分并挤出向量首位。
+    # 保留该语义锚点，避免融合结果反而丢失最接近用户问题的候选。
+    vector_anchor = fused[vector_rows[0]["chunk_id"]]
+    if vector_anchor not in ranked:
+        ranked = ranked[:-1] + [vector_anchor]
+        ranked.sort(key=lambda item: -item[1])
+    return ranked
 
 
 class KnowOne:
@@ -320,7 +409,7 @@ class KnowOne:
             raise InvalidArgument("创建 IndexGeneration 需要 embedding 模型配置")
 
         config = {
-            "chunker": "m1-paragraph-v1",
+            "chunker": "m1-pdf-section-v2",
             "embedding_model": self._embedding_model,
             "dimensions": self._embedding_dimensions,
             "full_text": FULL_TEXT_CONFIG_VERSION,
@@ -419,9 +508,10 @@ class KnowOne:
             if not chunks:
                 raise InvalidArgument("Revision 原文中没有可切分的文本段落")
             # 外部网络调用绝不放入数据库事务，避免长时间持锁。
-            vectors = OpenAIEmbeddingClient(
+            embedding_client = OpenAIEmbeddingClient(
                 self._embedding_endpoint, self._embedding_model, self._embedding_dimensions
-            ).embed([chunk[0] for chunk in chunks])
+            )
+            vectors = _embed_texts_in_batches(embedding_client, [chunk[0] for chunk in chunks])
             self._write_rebuilt_revision(
                 generation["namespace_id"], generation_id, revision["id"], chunks, vectors,
                 revision["source_media_type"], text, revision["source_snapshot"],
@@ -839,10 +929,80 @@ class KnowOne:
             # 指向唯一页码。保留全局字符偏移以便回查冻结的提取文本。
             for page in text.split("\f"):
                 for raw_text, start, end, heading_path in cls._paragraphs(page):
-                    chunks.append((raw_text, offset + start, offset + end, heading_path))
+                    if cls._is_low_information_pdf_chunk(raw_text):
+                        continue
+                    chunks.extend(
+                        cls._split_pdf_paragraph(raw_text, offset + start, heading_path)
+                    )
                 offset += len(page) + 1
             return chunks
         raise UnsupportedSource(f"未注册的来源媒体类型：{media_type}")
+
+    @staticmethod
+    def _is_low_information_pdf_chunk(raw_text: str) -> bool:
+        """识别 pdftotext 产生的孤立页码或短页眉，避免它们污染召回。"""
+        normalized = " ".join(raw_text.split())
+        if re.fullmatch(r"\d+", normalized):
+            return True
+        return bool(
+            len(normalized) <= 40
+            and re.fullmatch(r"\d+\s+\d+-\d+\.\s+\S.*", normalized)
+        )
+
+    @classmethod
+    def _split_pdf_paragraph(
+        cls, raw_text: str, start: int, heading_path: tuple[str, ...]
+    ) -> list[tuple[str, int, int, tuple[str, ...]]]:
+        """把过长 PDF 段落切为连续原文片段，优先保留 ``■`` 小节边界。"""
+        if len(raw_text) <= PDF_CHUNK_MAX_CHARS:
+            return [(raw_text, start, start + len(raw_text), heading_path)]
+
+        boundaries = [0]
+        boundaries.extend(
+            match.start() for match in re.finditer(r"(?m)^■", raw_text) if match.start() > 0
+        )
+        boundaries.append(len(raw_text))
+        chunks: list[tuple[str, int, int, tuple[str, ...]]] = []
+        for piece_start, piece_end in zip(boundaries, boundaries[1:]):
+            chunks.extend(
+                cls._split_pdf_piece(
+                    raw_text[piece_start:piece_end], start + piece_start, heading_path
+                )
+            )
+        return chunks
+
+    @staticmethod
+    def _split_pdf_piece(
+        raw_text: str, start: int, heading_path: tuple[str, ...]
+    ) -> list[tuple[str, int, int, tuple[str, ...]]]:
+        """仅在小节仍超长时，以中文句末标点作为不破坏语义的兜底边界。"""
+        if len(raw_text) <= PDF_CHUNK_MAX_CHARS:
+            return [(raw_text, start, start + len(raw_text), heading_path)]
+
+        chunks: list[tuple[str, int, int, tuple[str, ...]]] = []
+        piece_start = 0
+        last_sentence_end: int | None = None
+        for match in re.finditer(r"[。！？]", raw_text):
+            sentence_end = match.end()
+            if sentence_end - piece_start > PDF_CHUNK_MAX_CHARS:
+                if last_sentence_end is None:
+                    break
+                chunks.append(
+                    (
+                        raw_text[piece_start:last_sentence_end],
+                        start + piece_start,
+                        start + last_sentence_end,
+                        heading_path,
+                    )
+                )
+                piece_start = last_sentence_end
+            last_sentence_end = sentence_end
+        if piece_start:
+            chunks.append(
+                (raw_text[piece_start:], start + piece_start, start + len(raw_text), heading_path)
+            )
+            return chunks
+        return [(raw_text, start, start + len(raw_text), heading_path)]
 
     @staticmethod
     def _source_text(
@@ -937,9 +1097,10 @@ class KnowOne:
         if not chunks:
             raise InvalidArgument("来源中没有可切分的文本段落")
         # 外部网络调用绝不放入数据库事务，避免长时间持锁。
-        vectors = OpenAIEmbeddingClient(
+        embedding_client = OpenAIEmbeddingClient(
             self._embedding_endpoint, self._embedding_model, self._embedding_dimensions
-        ).embed([chunk[0] for chunk in chunks])
+        )
+        vectors = _embed_texts_in_batches(embedding_client, [chunk[0] for chunk in chunks])
 
         with self._connect() as connection, connection.transaction():
             current_generation = connection.execute(
@@ -1547,6 +1708,7 @@ class KnowOne:
         top_k: int = 8,
         deadline_ms: int = 3000,
         recall_mode: str = "hybrid",
+        include_context: bool = False,
     ) -> RetrievalResult:
         """受约束的混合检索，返回可引用的 Evidence 列表。
 
@@ -1574,6 +1736,8 @@ class KnowOne:
             deadline_ms: 本次检索总预算（毫秒）；耗尽抛 DeadlineExceeded。
             recall_mode: 召回候选来源；默认 hybrid 融合全文与向量，
                 full_text 和 vector 仅供受控诊断与评估使用。
+            include_context: 是否为每条主 Evidence 附加同修订的相邻原文；
+                补充原文不参与排序，且每段具有独立定位。
         """
         self._require_permission(access_scope, namespace, "read")
         if not query.strip():
@@ -1584,6 +1748,8 @@ class KnowOne:
             raise InvalidArgument("deadline_ms 必须大于 0")
         if not isinstance(recall_mode, str) or recall_mode not in {"hybrid", "full_text", "vector"}:
             raise InvalidArgument("recall_mode 必须是 hybrid、full_text 或 vector")
+        if not isinstance(include_context, bool):
+            raise InvalidArgument("include_context 必须是布尔值")
         deadline = monotonic() + deadline_ms / 1000
         at = at or datetime.now(UTC)
         _validate_timezone(at, field_name="at")
@@ -1654,7 +1820,7 @@ class KnowOne:
             if recall_mode != "vector" and full_text_query is not None:
                 rows = connection.execute(
                     """
-                SELECT chunk.id AS chunk_id, chunk.raw_text, chunk.source_locator,
+                SELECT chunk.id AS chunk_id, chunk.ordinal AS chunk_ordinal, chunk.raw_text, chunk.source_locator,
                        chunk.heading_path, revision.id AS revision_id, document.id AS document_id,
                        publication.valid_from, publication.valid_until
                 FROM chunk
@@ -1687,7 +1853,7 @@ class KnowOne:
                 vector_literal = "[" + ",".join(str(value) for value in query_vector) + "]"
                 vector_rows = connection.execute(
                     """
-                    SELECT chunk.id AS chunk_id, chunk.raw_text, chunk.source_locator,
+                    SELECT chunk.id AS chunk_id, chunk.ordinal AS chunk_ordinal, chunk.raw_text, chunk.source_locator,
                            chunk.heading_path, revision.id AS revision_id, document.id AS document_id,
                            publication.valid_from, publication.valid_until
                     FROM chunk
@@ -1717,16 +1883,7 @@ class KnowOne:
                 ).fetchall()
         if monotonic() >= deadline:
             raise DeadlineExceeded("检索 deadline 已耗尽")
-        fused: dict[object, tuple[dict, float]] = {}
-        for candidates, weight in (
-            (rows, FULL_TEXT_RRF_WEIGHT),
-            (vector_rows, VECTOR_RRF_WEIGHT),
-        ):
-            for rank, row in enumerate(candidates, start=1):
-                existing = fused.get(row["chunk_id"])
-                score = weight / (60 + rank) + (existing[1] if existing else 0.0)
-                fused[row["chunk_id"]] = (row, score)
-        ranked_rows = sorted(fused.values(), key=lambda item: -item[1])[:top_k]
+        ranked_rows = _fuse_rrf_candidates(rows, vector_rows, top_k=top_k)
         if ranked_rows:
             with self._connect() as connection:
                 self._set_retrieval_statement_timeout(connection, deadline)
@@ -1761,6 +1918,67 @@ class KnowOne:
             ranked_rows = [
                 item for item in ranked_rows if item[0]["chunk_id"] in valid_chunk_ids
             ]
+        context_parts_by_seed: dict[object, tuple[ContextPart, ...]] = {}
+        if include_context and ranked_rows:
+            with self._connect() as connection:
+                self._set_retrieval_statement_timeout(connection, deadline)
+                context_rows = connection.execute(
+                    """
+                    SELECT seed.id AS seed_chunk_id, neighbor.id AS chunk_id,
+                           neighbor.ordinal AS chunk_ordinal, neighbor.raw_text,
+                           neighbor.source_locator, neighbor.heading_path
+                    FROM chunk AS seed
+                    JOIN chunk AS neighbor
+                      ON neighbor.revision_id = seed.revision_id
+                     AND neighbor.index_generation_id = seed.index_generation_id
+                     AND neighbor.ordinal BETWEEN seed.ordinal - %s AND seed.ordinal + %s
+                     AND neighbor.id <> seed.id
+                    JOIN revision_index_build AS build
+                      ON build.revision_id = neighbor.revision_id
+                     AND build.index_generation_id = neighbor.index_generation_id
+                    JOIN document_revision AS revision ON revision.id = neighbor.revision_id
+                    JOIN document ON document.id = revision.document_id
+                    JOIN publication ON publication.revision_id = revision.id
+                                     AND publication.document_id = document.id
+                    WHERE seed.id = ANY(%s)
+                      AND neighbor.namespace_id = %s
+                      AND neighbor.index_generation_id = %s
+                      AND build.status = 'ready'
+                      AND document.withdrawn = false AND document.deleted_at IS NULL
+                      AND document.acl @> jsonb_build_object('principals', jsonb_build_array(%s::text))
+                      AND document.applicability <@ %s::jsonb
+                      AND publication.valid_from <= %s
+                      AND (publication.valid_until IS NULL OR %s < publication.valid_until)
+                    ORDER BY seed.id, abs(neighbor.ordinal - seed.ordinal), neighbor.ordinal
+                    """,
+                    (
+                        CONTEXT_PART_NEIGHBOR_DISTANCE,
+                        CONTEXT_PART_NEIGHBOR_DISTANCE,
+                        [row["chunk_id"] for row, _ in ranked_rows],
+                        namespace_row["id"], namespace_row["current_index_generation_id"],
+                        access_scope.principal_id, Jsonb(applicability), at, at,
+                    ),
+                ).fetchall()
+            primary_chunk_ids = {row["chunk_id"] for row, _ in ranked_rows}
+            mutable_parts: dict[object, list[ContextPart]] = {}
+            for context_row in context_rows:
+                if context_row["chunk_id"] in primary_chunk_ids:
+                    continue
+                parts = mutable_parts.setdefault(context_row["seed_chunk_id"], [])
+                if len(parts) < CONTEXT_PART_LIMIT:
+                    parts.append(
+                        ContextPart(
+                            text=context_row["raw_text"],
+                            chunk_id=str(context_row["chunk_id"]),
+                            source_locator=context_row["source_locator"],
+                            heading_path=tuple(context_row["heading_path"]),
+                        )
+                    )
+            context_parts_by_seed = {
+                chunk_id: tuple(parts) for chunk_id, parts in mutable_parts.items()
+            }
+        if monotonic() >= deadline:
+            raise DeadlineExceeded("检索 deadline 已耗尽")
         score_type = "rrf" if recall_mode == "hybrid" else recall_mode
         vector_unavailable = recall_mode != "full_text" and query_vector is None
         return RetrievalResult(
@@ -1771,6 +1989,7 @@ class KnowOne:
                     source_locator=row["source_locator"], heading_path=tuple(row["heading_path"]),
                     publication_valid_from=row["valid_from"], publication_valid_until=row["valid_until"],
                     rank_score=score, score_type=score_type,
+                    context_parts=context_parts_by_seed.get(row["chunk_id"], ()),
                 ) for row, score in ranked_rows
             ),
             index_generation=str(namespace_row["current_index_generation_id"]),

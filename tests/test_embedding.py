@@ -2,9 +2,14 @@
 
 from __future__ import annotations
 
+from io import BytesIO
 import json
+from urllib.error import HTTPError
+
+import pytest
 
 from know_one.embedding import OpenAIEmbeddingClient
+from know_one.errors import DependencyUnavailable
 
 
 class _Response:
@@ -66,3 +71,18 @@ def test_openai_embedding_client_uses_the_callers_timeout_budget(monkeypatch) ->
     )
 
     assert seen["timeout"] == 1.5
+
+
+def test_openai_embedding_client_reports_http_status_without_request_content(monkeypatch) -> None:
+    """长文入库失败时应区分服务端拒绝，且不把原文回显到错误中。"""
+    error = HTTPError(
+        "http://embedding/v1/embeddings",
+        413,
+        "Payload Too Large",
+        None,
+        BytesIO(b'{"error":"input too long"}'),
+    )
+    monkeypatch.setattr("know_one.embedding.urlopen", lambda *_args, **_kwargs: (_ for _ in ()).throw(error))
+
+    with pytest.raises(DependencyUnavailable, match=r"HTTP 413.*input too long"):
+        OpenAIEmbeddingClient("http://embedding/v1", "test-model", 2).embed(["不应出现在错误中"])

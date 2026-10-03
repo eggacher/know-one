@@ -18,6 +18,7 @@ from know_one.errors import (
 )
 from know_one.model import (
     AccessScope,
+    ContextPart,
     Evidence,
     IngestionJobRef,
     IngestionStatus,
@@ -29,6 +30,7 @@ __all__ = [
     "AccessScope",
     "AccessDenied",
     "ConcurrentModification",
+    "ContextPart",
     "DeadlineExceeded",
     "Evidence",
     "DependencyUnavailable",

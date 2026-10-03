@@ -53,6 +53,25 @@ workdir/                 # 产物，不入库（.gitignore）
 - [ ] 保养手册表格还原（复用双通道模式）
 - [ ] 全量向量化 + SQLite 检索
 
+KnowOne 的全量检索示例不复用上述 SQLite 计划。对于有文本层的两本用户手册，先创建车型专属 Namespace，再运行：
+
+```bash
+.venv/bin/python -m know_one create-namespace rav4-gasoline
+PYTHONPATH=. .venv/bin/python examples/rav4/scripts/ingest_owner_manual.py \
+  --variant gasoline --namespace rav4-gasoline --principal evaluator
+```
+
+混动版使用 `rav4-hybrid` Namespace 与 `--variant hybrid`。当前核心 PDF 管线不应直接导入扫描型多媒体手册或以表格为主的保养手册；它们分别需要 OCR 与结构化表格解析后再评估。
+
+`eval/hybrid_smoke.jsonl` 是混动版的 22 条开发冒烟样本，页码和原文片段均从混动手册独立核对，不能复用汽油版 `smoke.jsonl`。同一安全操作在多页有等价表述时，样本列出全部已核对的可接受页码，避免把正确的替代原文误判为漏检。它用于快速发现版本间页码、措辞和排序差异；在独立人工复核后才可作为验收 Golden Set。发布混动手册后可运行：
+
+```bash
+PYTHONPATH=. .venv/bin/python -m know_one.eval.smoke \
+  --dataset examples/rav4/eval/hybrid_smoke.jsonl \
+  --namespace rav4-hybrid --principal evaluator --deadline-ms 15000 \
+  --include-miss-evidence
+```
+
 ## 双通道校验经验（首战记录）
 
 1. **几何通道强在「格」**：pdftotext -bbox 的词级坐标与列锚点实测

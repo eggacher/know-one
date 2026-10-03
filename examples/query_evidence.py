@@ -41,12 +41,23 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--applicability", default="{}", help="产品等适用条件 JSON 对象")
     parser.add_argument("--top-k", type=int, default=5)
     parser.add_argument("--deadline-ms", type=int, default=3000)
+    parser.add_argument(
+        "--include-context",
+        action="store_true",
+        help="附带主 Evidence 的相邻原文；主证据排序不受影响",
+    )
+    parser.add_argument(
+        "--recall-mode",
+        choices=("hybrid", "full_text", "vector"),
+        default="hybrid",
+        help="候选来源；用于对比全文、向量与混合召回",
+    )
     return parser
 
 
 def _evidence_json(evidence) -> dict:
     """仅序列化可交给调用方生成层的 Evidence 与可追溯定位。"""
-    return {
+    value = {
         "text": evidence.text,
         "document_id": evidence.document_id,
         "revision_id": evidence.revision_id,
@@ -62,6 +73,17 @@ def _evidence_json(evidence) -> dict:
         "rank_score": evidence.rank_score,
         "score_type": evidence.score_type,
     }
+    if evidence.context_parts:
+        value["context_parts"] = [
+            {
+                "text": part.text,
+                "chunk_id": part.chunk_id,
+                "source_locator": part.source_locator,
+                "heading_path": list(part.heading_path),
+            }
+            for part in evidence.context_parts
+        ]
+    return value
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -89,6 +111,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             applicability=applicability,
             top_k=arguments.top_k,
             deadline_ms=arguments.deadline_ms,
+            recall_mode=arguments.recall_mode,
+            include_context=arguments.include_context,
         )
     except (RuntimeError, ValueError, KnowOneError) as error:
         parser.error(str(error))

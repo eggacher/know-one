@@ -92,8 +92,18 @@ class IngestionStatus:
 
 
 @dataclass(frozen=True)
+class ContextPart:
+    """主 Evidence 的补充原文；必须保有独立的 Chunk 与定位。"""
+
+    text: str
+    chunk_id: str
+    source_locator: dict
+    heading_path: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class Evidence:
-    """检索命中的可引用原文及其不可变定位。"""
+    """检索命中的主原文及其不可变定位。"""
 
     text: str
     document_id: str
@@ -105,6 +115,8 @@ class Evidence:
     heading_path: tuple[str, ...] = ()
     rank_score: float = 0.0
     score_type: str = "rrf"
+    context_parts: tuple[ContextPart, ...] = ()
+    """仅在调用方显式请求时附带的相邻原文，每项单独引用。"""
 
 
 @dataclass(frozen=True)

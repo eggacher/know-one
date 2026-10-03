@@ -1,0 +1,30 @@
+{"id":"rav4-hev-draft-safety-001","query":"开车时能调驾驶座椅吗？","expected_any":["驾驶过程中不要调节驾驶员座椅的位置"],"expected_pages":[25],"source":"hybrid-owner-manual","review_status":"pending"}
+{"id":"rav4-hev-draft-safety-002","query":"开车前所有人都要系安全带吗？","expected_any":["确保所有乘客均已佩戴座椅安全带"],"expected_pages":[26],"source":"hybrid-owner-manual","review_status":"pending"}
+{"id":"rav4-hev-draft-child-001","query":"小孩建议坐前排还是后排？","expected_any":["建议儿童坐在后排座椅上","请将儿童保护装置安装到后排座椅上","使用适合儿童年龄和体形的儿童保护装置，并安装到后排座椅上"],"expected_pages":[38,41,43],"source":"hybrid-owner-manual","review_status":"pending"}
+{"id":"rav4-hev-draft-child-002","query":"能把孩子单独留在车里吗？","expected_any":["切勿将儿童单独留在车内"],"expected_pages":[38],"source":"hybrid-owner-manual","review_status":"pending"}
+{"id":"rav4-hev-draft-hybrid-001","query":"挂 N 挡时能给牵引用电池充电吗？","expected_any":["换档杆置于 N 位置时，不对混合动力蓄电池 （牵引用蓄电池）充电"],"expected_pages":[64],"source":"hybrid-owner-manual","review_status":"pending"}
+{"id":"rav4-hev-draft-hybrid-002","query":"混动车高压系统最高多少伏？","expected_any":["高电压系统 （最高大约 650 V （伏））"],"expected_pages":[67],"source":"hybrid-owner-manual","review_status":"pending"}
+{"id":"rav4-hev-draft-security-001","query":"没有注册的钥匙能启动混动系统吗？","expected_any":["如果钥匙没有预先注册到车载电脑中，该芯片将阻止混合动力系统起动"],"expected_pages":[71],"source":"hybrid-owner-manual","review_status":"pending"}
+{"id":"rav4-hev-draft-key-001","query":"电子钥匙快没电有什么表现？","expected_any":["智能进入和起动系统或无线遥控无法工作"],"expected_pages":[98],"source":"hybrid-owner-manual","review_status":"pending"}
+{"id":"rav4-hev-draft-key-002","query":"坐飞机能按电子钥匙吗？","expected_any":["确保不会在飞机机舱内按下电子钥匙上的任何按钮"],"expected_pages":[98],"source":"hybrid-owner-manual","review_status":"pending"}
+{"id":"rav4-hev-draft-door-001","query":"怎么用门把手锁车？","expected_any":["触按锁止传感器 （车门把手上部的凹痕）可锁止车门"],"expected_pages":[101],"source":"hybrid-owner-manual","review_status":"pending"}
+{"id":"rav4-hev-draft-window-001","query":"熄火后车窗还能操作多久？","expected_any":["电源开关切换至 ACC 或关闭后约 45 秒内，仍可操作电动车窗"],"expected_pages":[135],"source":"hybrid-owner-manual","review_status":"pending"}
+{"id":"rav4-hev-draft-transmission-001","query":"P 挡有什么用途？","expected_any":["驻车 / 起动混合动力系统"],"expected_pages":[160],"source":"hybrid-owner-manual","review_status":"pending"}
+{"id":"rav4-hev-draft-signal-001","query":"轻拨一下转向灯会闪几次？","expected_any":["右侧信号灯将闪烁 3 次"],"expected_pages":[163],"source":"hybrid-owner-manual","review_status":"pending"}
+{"id":"rav4-hev-draft-parking-001","query":"电子驻车制动怎么手动拉起？","expected_any":["拉起开关可施加驻车制动"],"expected_pages":[164],"source":"hybrid-owner-manual","review_status":"pending"}
+{"id":"rav4-hev-draft-brake-001","query":"驾驶员门没关能用制动保持吗？","expected_any":["驾驶员车门未关闭"],"expected_pages":[167],"source":"hybrid-owner-manual","review_status":"pending"}
+{"id":"rav4-hev-draft-fog-001","query":"前雾灯什么时候能开？","expected_any":["前雾灯：大灯或前位灯打开"],"expected_pages":[174],"source":"hybrid-owner-manual","review_status":"pending"}
+{"id":"rav4-hev-draft-mode-001","query":"环保模式适合什么情况？","expected_any":["适用于改善燃油经济性"],"expected_pages":[215],"source":"hybrid-owner-manual","review_status":"pending"}
+{"id":"rav4-hev-draft-traction-001","query":"TRC 是干什么的？","expected_any":["有助于保持驱动力并防止驱动轮空转"],"expected_pages":[218],"source":"hybrid-owner-manual","review_status":"pending"}
+{"id":"rav4-hev-draft-winter-001","query":"冬天要装几条雪地胎？","expected_any":["给车辆安装四个雪地轮胎"],"expected_pages":[246],"source":"hybrid-owner-manual","review_status":"pending"}
+{"id":"rav4-hev-draft-climate-001","query":"座椅加热在什么状态能用？","expected_any":["电源开关置于 ON 时，可使用座椅加热器"],"expected_pages":[257],"source":"hybrid-owner-manual","review_status":"pending"}
+{"id":"rav4-hev-draft-storage-001","query":"眼镜和打火机可以留在车里吗？","expected_any":["不要将眼镜、打火机或喷雾罐留在储物装置中"],"expected_pages":[260],"source":"hybrid-owner-manual","review_status":"pending"}
+{"id":"rav4-hev-draft-cargo-001","query":"不用行李挂钩时要收起来吗？","expected_any":["不使用挂钩时，务必将其返回收起位置"],"expected_pages":[264],"source":"hybrid-owner-manual","review_status":"pending"}
+{"id":"rav4-hev-draft-socket-001","query":"车载电源插座最大功率多少？","expected_any":["功耗 120 W （瓦）"],"expected_pages":[267],"source":"hybrid-owner-manual","review_status":"pending"}
+{"id":"rav4-hev-draft-aux-001","query":"AUX 接口能传视频吗？","expected_any":["AUX 接口仅支持音频输入"],"expected_pages":[271],"source":"hybrid-owner-manual","review_status":"pending"}
+{"id":"rav4-hev-draft-maintenance-001","query":"定期保养按时间还是里程？","expected_any":["以先达到者为准"],"expected_pages":[278],"source":"hybrid-owner-manual","review_status":"pending"}
+{"id":"rav4-hev-draft-pressure-001","query":"轮胎冷却多久后测胎压比较准？","expected_any":["车辆已经停放了至少 3 小时，或行驶未超过 1.5 km （公里）"],"expected_pages":[303],"source":"hybrid-owner-manual","review_status":"pending"}
+{"id":"rav4-hev-draft-pressure-002","query":"胎压多久检查一次比较好？","expected_any":["我们建议每两周检查一次轮胎气压"],"expected_pages":[303],"source":"hybrid-owner-manual","review_status":"pending"}
+{"id":"rav4-hev-draft-wheel-001","query":"换车轮后还要装胎压传感器吗？","expected_any":["只要更换车轮，必须安装轮胎气压警告阀和发射器"],"expected_pages":[304],"source":"hybrid-owner-manual","review_status":"pending"}
+{"id":"rav4-hev-draft-key-battery-001","query":"电子钥匙换什么型号电池？","expected_any":["锂电池 CR2032"],"expected_pages":[314],"source":"hybrid-owner-manual","review_status":"pending"}
+{"id":"rav4-hev-draft-fuse-001","query":"保险丝能换成更大安培的吗？","expected_any":["切勿使用高于额定安培值的保险丝"],"expected_pages":[317],"source":"hybrid-owner-manual","review_status":"pending"}

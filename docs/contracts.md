@@ -1,6 +1,6 @@
 # 接口契约
 
-状态：M1 核心接口已实现并有 PostgreSQL 集成测试：来源快照入库、IndexGeneration、发布、撤回、ACL、删除和受约束检索均可运行。本文同时保留商用首版的目标约束；预览、取消计划发布、长生命周期 Scope 校验、阶段耗时和 `context_parts` 等未在当前代码实现，不能据此当作现有 API 承诺。以 `KnowOne` 的公开签名、测试和 README 运行示例为当前可调用行为的依据。
+状态：M1 核心接口已实现并有 PostgreSQL 集成测试：来源快照入库、IndexGeneration、发布、撤回、ACL、删除和受约束检索均可运行。`retrieve(include_context=True)` 可为主 Evidence 附加带独立定位的相邻原文，但不改变主 Evidence 排序。本文同时保留商用首版的目标约束；预览、取消计划发布、长生命周期 Scope 校验和阶段耗时等未在当前代码实现，不能据此当作现有 API 承诺。以 `KnowOne` 的公开签名、测试和 README 运行示例为当前可调用行为的依据。
 
 ## 共同约束
 

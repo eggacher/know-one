@@ -1,0 +1,22 @@
+{"id":"rav4-hev-key-001","query":"电子钥匙没电时怎么开车门？","expected_any":["使用机械钥匙"],"expected_pages":[114,356],"source":"hybrid-owner-manual"}
+{"id":"rav4-hev-wiper-001","query":"喷洗液用完了还能一直按吗？","expected_any":["不要连续操作该开关"],"expected_pages":[176,177],"source":"hybrid-owner-manual"}
+{"id":"rav4-hev-fuel-001","query":"油枪自动跳枪后还要继续加油吗？","expected_any":["停止向燃油箱加注燃油"],"expected_pages":[178],"source":"hybrid-owner-manual"}
+{"id":"rav4-hev-fuse-001","query":"能不能用导线临时代替保险丝？","expected_any":["切勿用导线代替保险丝"],"expected_pages":[317],"source":"hybrid-owner-manual"}
+{"id":"rav4-hev-tire-001","query":"换轮胎时要拉手刹吗？","expected_any":["施加驻车制动"],"expected_pages":[346,348],"source":"hybrid-owner-manual"}
+{"id":"rav4-hev-tire-002","query":"换轮胎时能把车顶得很高吗？","expected_any":["不要将车辆顶起至不必要的高度"],"expected_pages":[348],"source":"hybrid-owner-manual"}
+{"id":"rav4-hev-key-002","query":"电子钥匙电池一般能用多久？","expected_any":["标准电池使用寿命为 1 至 2 年"],"expected_pages":[98],"source":"hybrid-owner-manual"}
+{"id":"rav4-hev-start-001","query":"怎么确认混合动力系统已成功起动？","expected_any":["检查并确认 “READY” 指示灯点亮"],"expected_pages":[154],"source":"hybrid-owner-manual"}
+{"id":"rav4-hev-start-002","query":"READY 指示灯不亮怎么办？","expected_any":["请立即联系丰田经销店等"],"expected_pages":[154,155],"source":"hybrid-owner-manual"}
+{"id":"rav4-hev-park-001","query":"混动车停车后怎么关闭系统？","expected_any":["关闭电源开关以停止混合动力系统","混合动力系统将停止","将换档杆换至 P 位置，施加驻车制动并按下电源开关"],"expected_pages":[146,156,357],"source":"hybrid-owner-manual"}
+{"id":"rav4-hev-brake-001","query":"驾驶员车门没关能打开制动保持吗？","expected_any":["驾驶员车门未关闭"],"expected_pages":[167],"source":"hybrid-owner-manual"}
+{"id":"rav4-hev-fuel-002","query":"加油能超过半小时吗？","expected_any":["在 30 分钟内结束加油"],"expected_pages":[178],"source":"hybrid-owner-manual"}
+{"id":"rav4-hev-tire-003","query":"调完胎压后还要做什么？","expected_any":["调节轮胎气压后确保执行初始化"],"expected_pages":[302],"source":"hybrid-owner-manual"}
+{"id":"rav4-hev-traction-battery-001","query":"牵引用蓄电池冷却零部件提示维护怎么办？","expected_any":["拆下进气通风口盖并清洁滤清器"],"expected_pages":[310],"source":"hybrid-owner-manual"}
+{"id":"rav4-hev-traction-battery-002","query":"能用水清洁牵引用蓄电池进气口吗？","expected_any":["不要用水或其他液体清洁进气通风口"],"expected_pages":[310],"source":"hybrid-owner-manual"}
+{"id":"rav4-hev-tire-004","query":"轮胎气压警告灯闪烁代表什么？","expected_any":["轮胎气压警告系统可能存在故障"],"expected_pages":[341],"source":"hybrid-owner-manual"}
+{"id":"rav4-hev-towing-001","query":"拖车时能关闭电源开关吗？","expected_any":["不要关闭电源开关"],"expected_pages":[331],"source":"hybrid-owner-manual"}
+{"id":"rav4-hev-tire-005","query":"轮胎漏气还能继续开吗？","expected_any":["轮胎漏气时不要继续驾驶车辆"],"expected_pages":[346],"source":"hybrid-owner-manual"}
+{"id":"rav4-hev-spare-001","query":"紧凑型备胎能长期使用吗？","expected_any":["仅在紧急情况下临时使用紧凑型备胎"],"expected_pages":[351],"source":"hybrid-owner-manual"}
+{"id":"rav4-hev-spare-002","query":"装紧凑型备胎最高能开多快？","expected_any":["驾驶速度不要超过 80 km/h"],"expected_pages":[352],"source":"hybrid-owner-manual"}
+{"id":"rav4-hev-battery-001","query":"12伏蓄电池没电能推车起动吗？","expected_any":["利用推车起动方式无法起动混合动力系统"],"expected_pages":[359],"source":"hybrid-owner-manual"}
+{"id":"rav4-hev-overheat-001","query":"混合动力系统过热且动力降低怎么办？","expected_any":["停止混合动力系统，并小心地掀起发动机盖"],"expected_pages":[364],"source":"hybrid-owner-manual"}

@@ -38,6 +38,7 @@ def test_query_evidence_example_serializes_evidence_without_generating_an_answer
             assert scope.principal_id == "operator"
             assert scope.permissions == frozenset({"read"})
             assert kwargs["applicability"] == {"model": "rav4"}
+            assert kwargs["recall_mode"] == "vector"
             evidence = Evidence(
                 text="请定期保养。",
                 document_id="document-1",
@@ -62,6 +63,7 @@ def test_query_evidence_example_serializes_evidence_without_generating_an_answer
         [
             "--namespace", "manual", "--principal", "operator", "--query", "怎么保养",
             "--dsn", "postgresql://test", "--applicability", '{"model":"rav4"}',
+            "--recall-mode", "vector",
         ]
     ) == 0
 

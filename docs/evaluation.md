@@ -6,6 +6,8 @@
 
 从已批准使用的真实 FAQ／公告、真实或人工采集的客服问题起步。合成的约 100 条样本只作冒烟回归，不能独自证明商用效果。没有真实用户日志时，由业务人员根据真实材料独立编写问题，记录其分布局限，试点中持续收集脱敏失败样例。
 
+可直接按 [Golden Set 编写指南](golden-set-authoring.md) 准备首批检索和回答标注；它使用当前 smoke 支持的 JSONL 字段，不要求先引入新评测框架。
+
 建议先积累 500–1000 条人工确认样本，其中至少 20% 为无答案或不应回答问题；数量不替代覆盖度。按文档／主题分组划分开发和锁定验收集，避免同一 FAQ 的改写跨集合泄漏；补充时间变化的独立回归集。
 
 每条样本包含 query、Namespace、AccessScope、at、业务适用条件、可接受 revision、原文支持区间，以及无答案／拒绝原因。支持证据存在替代方案或必须多段联合时，用“可接受证据组”标注。错误答案候选也记录，便于测相似干扰。
@@ -30,6 +32,22 @@ python -m know_one.eval.smoke --dataset smoke.jsonl --namespace rav4 --principal
 命令分别调用 `retrieve(..., recall_mode="full_text" | "vector" | "hybrid")`，输出每路命中数、命中率和漏检样本 ID。`--deadline-ms` 作用于每一条检索，而非整批评测。它只判断结果是否包含人工标注片段；比较时忽略空白字符，以适配 PDF 文本层的硬换行，不替代引用完整性、无答案或商用验收指标。
 
 需要诊断排序时，附加 `--include-miss-evidence`；报告只为漏检样本输出其候选原文，不应把该包含正文的报告提交到不具备资料访问权限的位置。
+
+### 回答层 smoke 评估
+
+RAV4 还提供回答层的正例／拒答回归集。它不比较 LLM 的自然语言措辞，而是验证正例的程序化引用页码，以及负例是否返回空引用的 `insufficient_evidence`／`no_evidence`：
+
+```bash
+PYTHONPATH=. .venv/bin/python examples/rav4/scripts/answer_smoke.py \
+  --dataset examples/rav4/eval/answer_smoke.jsonl \
+  --namespace rav4-hybrid --principal evaluator --deadline-ms 15000
+```
+
+报告同时输出每条端到端 `latencies_ms`、按阶段拆分的 `stage_latencies_ms`，以及样本内 `p50`／`p95`。LM Studio 支持时还会输出每条 `llm_stats`，包括输入／输出／推理 token、首 token 时间、生成速度和本次模型加载时间。该数字包含检索与本地 LLM 生成，仅用于比较同一机器、模型与样本下的回归；不能视为线上 SLA。
+
+要排查偶发长等待，可指定 `--runs 3` 连续执行三轮；输出的 `summary.time_to_first_token_seconds` 是跨轮、跨样本的首 token P50／P95。稳定性样本会调用真实模型，运行前应确认本地模型服务没有其他并发任务。
+
+若要测量减少上下文是否能降低本地模型耗时，可在保持相同数据集、模型和超时设置的条件下指定 `--top-k 1`。先确认通过率和引用页码不退化，再与默认的 `--top-k 3` 对比阶段耗时；这是一项实验参数，不应未经回归验证改成产品默认值。若正确页依赖多个相邻 Chunk，应保留 `--top-k 3`，改用 `--max-output-tokens 80` 评估缩短生成上限的效果。
 
 ## 指标口径
 
