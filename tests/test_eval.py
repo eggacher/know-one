@@ -9,7 +9,8 @@ from pathlib import Path
 import pytest
 
 from know_one import ContextPart, Evidence, RetrievalResult
-from know_one.eval.smoke import load_cases, load_expansions, main
+from know_one.eval.smoke import load_cases, main
+from know_one.query_expansion import load_expansions
 
 
 def test_hybrid_golden_draft_has_unique_parseable_cases() -> None:

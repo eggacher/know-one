@@ -415,3 +415,55 @@ def test_answer_example_stream_reports_model_load_and_prompt_processing_stages()
     stages: list[str] = []
     module._stream_body(response, 1, lambda _text: None, on_stage=stages.append)
     assert stages == ["model_load.start", "prompt_processing.end"]
+
+
+def test_answer_example_applies_query_expansion_dictionary(monkeypatch, capsys, tmp_path) -> None:
+    """--expansions 词典在检索前追加手册术语，调用方口语补全可见于报告。"""
+    module = _example_module()
+    dictionary = tmp_path / "expansions.json"
+    dictionary.write_text(
+        json.dumps({"转向灯": ["转向信号灯"]}, ensure_ascii=False), encoding="utf-8"
+    )
+    received: list[str] = []
+
+    class FakeKnowOne:
+        def __init__(self, _dsn: str) -> None:
+            pass
+
+        def retrieve(self, query: str, *_args: object, **_kwargs: object) -> RetrievalResult:
+            received.append(query)
+            evidence = Evidence(
+                text="右侧信号灯将闪烁 3 次。",
+                document_id="document-1",
+                revision_id="revision-1",
+                chunk_id="chunk-1",
+                source_locator={"char_start": 0, "char_end": 12, "page": 163},
+                publication_valid_from=datetime(2026, 1, 1, tzinfo=UTC),
+                publication_valid_until=None,
+            )
+            return RetrievalResult((evidence,), "generation-1", "test-model", "trace-1")
+
+    class Response:
+        def read(self) -> bytes:
+            return '{"output":[{"type":"message","content":"将闪烁 3 次。[证据 1]"}]}'.encode("utf-8")
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+    monkeypatch.setattr(module, "KnowOne", FakeKnowOne)
+    monkeypatch.setattr(module, "urlopen", lambda *_args, **_kwargs: Response())
+
+    assert module.main(
+        [
+            "--namespace", "manuals", "--principal", "reader",
+            "--query", "轻拨一下转向灯会闪几次？",
+            "--dsn", "postgresql://test",
+            "--expansions", str(dictionary),
+        ]
+    ) == 0
+    assert received == ["轻拨一下转向灯会闪几次？ 转向信号灯"]
+    report = json.loads(capsys.readouterr().out)
+    assert report["expanded_query"] == "轻拨一下转向灯会闪几次？ 转向信号灯"

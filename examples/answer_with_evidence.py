@@ -11,10 +11,12 @@ from time import monotonic
 from typing import Callable, Sequence
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
+from pathlib import Path
 
 from know_one import AccessScope, KnowOne
 from know_one.config import load_local_env
 from know_one.errors import KnowOneError
+from know_one.query_expansion import expand_query, load_expansions
 
 
 DEFAULT_LM_STUDIO_BASE_URL = "http://192.168.2.6:1234/api/v1"
@@ -61,6 +63,11 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--llm-model",
         default=os.environ.get("KNOWONE_ANSWER_MODEL", DEFAULT_LM_STUDIO_MODEL),
+    )
+    parser.add_argument(
+        "--expansions",
+        type=Path,
+        help="查询扩展词典 JSON（口语词 → 手册术语），检索前追加进查询",
     )
     parser.add_argument("--answer-timeout-seconds", type=float, default=60)
     parser.add_argument(
@@ -330,9 +337,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         parser.error("max-output-tokens 必须大于 0")
     scope = AccessScope(arguments.principal, frozenset({arguments.namespace}), frozenset({"read"}))
     try:
+        # 契约规定口语补全由调用方完成：词典命中时追加手册术语后再检索。
+        expansions = load_expansions(arguments.expansions) if arguments.expansions else None
+        expanded_query = expand_query(arguments.query, expansions)
         retrieval_started_at = monotonic()
         result = KnowOne(arguments.dsn).retrieve(
-            arguments.query,
+            expanded_query,
             arguments.namespace,
             scope,
             top_k=arguments.top_k,
@@ -445,6 +455,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     if arguments.include_timings:
         report["timings_ms"] = {"retrieval": retrieval_ms, "llm": llm_ms}
         report["llm_stats"] = llm_stats
+    # 仅在调用方显式传词典时记录实际检索查询，报告结构对既有消费方保持不变。
+    if arguments.expansions:
+        report["expanded_query"] = expanded_query
     print(json.dumps(report, ensure_ascii=False, sort_keys=True))
     return 0
 

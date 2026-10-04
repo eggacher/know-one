@@ -13,43 +13,10 @@ from typing import Mapping, Sequence
 from know_one import AccessScope, KnowOne
 from know_one.config import load_local_env
 from know_one.errors import KnowOneError
+from know_one.query_expansion import expand_query, load_expansions
 
 
 RECALL_MODES = ("full_text", "vector", "hybrid")
-
-
-def load_expansions(path: Path) -> dict[str, tuple[str, ...]]:
-    """读取调用方查询扩展词典（口语词 → 手册侧术语）。
-
-    契约规定 query 口语补全由调用方完成；词典把用户措辞映射到
-    手册术语，评测器在检索前把命中术语追加进查询文本。
-    """
-    try:
-        value = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as error:
-        raise ValueError(f"无法读取查询扩展词典 {path}") from error
-    if (
-        not isinstance(value, dict)
-        or not value
-        or not all(
-            isinstance(key, str)
-            and key.strip()
-            and isinstance(synonyms, list)
-            and synonyms
-            and all(isinstance(text, str) and text.strip() for text in synonyms)
-            for key, synonyms in value.items()
-        )
-    ):
-        raise ValueError("词典必须是 {{非空查询词: [非空手册术语, ...]}} 的 JSON 对象")
-    return {key: tuple(synonyms) for key, synonyms in value.items()}
-
-
-def _expand_query(query: str, expansions: Mapping[str, Sequence[str]] | None) -> str:
-    """把命中的手册术语追加到查询尾部；原文与术语都保留，两路各自消化。"""
-    if not expansions:
-        return query
-    appended = [term for key, synonyms in expansions.items() if key in query for term in synonyms]
-    return f"{query} {' '.join(dict.fromkeys(appended))}" if appended else query
 
 
 @dataclass(frozen=True)
@@ -168,7 +135,7 @@ def evaluate(
     # 跨块答案需要补充上下文才能判定；主证据排序与数量不受其影响。
     needs_context = any(case.expected_context_any is not None for case in cases)
     expanded_queries = {
-        case.identifier: _expand_query(case.query, expansions) for case in cases
+        case.identifier: expand_query(case.query, expansions) for case in cases
     }
     expansions_applied = sum(
         expanded_queries[case.identifier] != case.query for case in cases

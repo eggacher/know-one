@@ -192,6 +192,11 @@ def _parser() -> argparse.ArgumentParser:
         default=120,
         help="单条本地 LLM 回答超时；9B 模型连续 smoke 时建议保留加载与排队余量",
     )
+    parser.add_argument(
+        "--expansions",
+        type=Path,
+        help="查询扩展词典 JSON，透传给回答示例在检索前追加手册术语",
+    )
     return parser
 
 
@@ -218,6 +223,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             command.extend(["--dsn", arguments.dsn])
         if arguments.context_neighbors:
             command.append("--context-neighbors")
+        # 词典交给回答示例内部加载与扩展，两处共用 know_one.query_expansion 实现。
+        if arguments.expansions:
+            command.extend(["--expansions", str(arguments.expansions)])
         with redirect_stdout(output), redirect_stderr(output):
             try:
                 exit_code = module.main(command)

@@ -113,3 +113,15 @@ def test_answer_smoke_summarizes_first_token_tail_latency_across_runs() -> None:
         "pass_rate": 0.5,
         "time_to_first_token_seconds": {"p50": 0.4, "p95": 3.8},
     }
+
+
+def test_answer_smoke_accepts_query_expansion_dictionary() -> None:
+    """--expansions 透传给回答示例，回答链路与检索评测共用同一词典口径。"""
+    module = _module()
+    arguments = module._parser().parse_args(
+        [
+            "--dataset", "cases.jsonl", "--namespace", "rav4", "--principal", "evaluator",
+            "--expansions", "expansions.json",
+        ]
+    )
+    assert arguments.expansions == Path("expansions.json")
