@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 
 from know_one import ContextPart, Evidence, RetrievalResult
-from know_one.eval.smoke import load_cases, main
+from know_one.eval.smoke import load_cases, load_expansions, main
 
 
 def test_hybrid_golden_draft_has_unique_parseable_cases() -> None:
@@ -310,3 +310,86 @@ def test_load_cases_rejects_malformed_expected_context_any(tmp_path) -> None:
 
     with pytest.raises(ValueError, match="第 1 行"):
         load_cases(dataset)
+
+
+def test_smoke_cli_applies_query_expansions_when_provided(
+    tmp_path, capsys, monkeypatch
+) -> None:
+    """--expansions 词典把手册侧术语追加进查询，模拟调用方口语补全。
+
+    契约规定 query 口语补全由调用方完成（contracts.md），评测器作为
+    调用方在检索前追加同义术语；报告需记录扩展生效的样本数以便复现。
+    """
+    dataset = tmp_path / "signal.jsonl"
+    dataset.write_text(
+        json.dumps(
+            {
+                "id": "signal-001",
+                "query": "轻拨一下转向灯会闪几次？",
+                "expected_any": ["右侧信号灯将闪烁 3 次"],
+                "expected_pages": [163],
+            },
+            ensure_ascii=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    expansions = tmp_path / "expansions.json"
+    expansions.write_text(
+        json.dumps({"转向灯": ["转向信号灯"]}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    class FakeKnowOne:
+        """记录实际收到的查询，验证扩展发生在评测器调用方一侧。"""
+
+        instances: list["FakeKnowOne"] = []
+
+        def __init__(self, dsn: str) -> None:
+            self.received_queries: list[str] = []
+            type(self).instances.append(self)
+
+        def retrieve(self, query: str, namespace: str, access_scope, **kwargs: object) -> RetrievalResult:
+            self.received_queries.append(query)
+            text = "右侧信号灯将闪烁 3 次" if "转向信号灯" in query else "无关内容"
+            evidence = Evidence(
+                text=text,
+                document_id="document-1",
+                revision_id="revision-1",
+                chunk_id="chunk-1",
+                source_locator={"char_start": 0, "char_end": len(text), "page": 163},
+                publication_valid_from=datetime(2026, 9, 1, tzinfo=UTC),
+                publication_valid_until=None,
+            )
+            return RetrievalResult(
+                evidence=(evidence,),
+                index_generation="generation-1",
+                model_version="test-model",
+                trace_id="trace-1",
+            )
+
+    monkeypatch.setattr("know_one.eval.smoke.KnowOne", FakeKnowOne)
+
+    assert main(
+        [
+            "--dataset", str(dataset), "--namespace", "rav4", "--principal", "evaluator",
+            "--dsn", "postgresql://test", "--expansions", str(expansions),
+        ]
+    ) == 0
+
+    report = json.loads(capsys.readouterr().out)
+    assert report["expansions_applied"] == 1
+    assert report["modes"]["hybrid"]["hits"] == 1
+    # 三种召回模式共用同一扩展查询，原查询不因词典而丢弃。
+    assert FakeKnowOne.instances[0].received_queries == [
+        "轻拨一下转向灯会闪几次？ 转向信号灯",
+    ] * 3
+
+
+def test_load_expansions_rejects_malformed_dictionary(tmp_path) -> None:
+    """词典必须是 {非空 str: [非空 str, ...]}，防止静默失效。"""
+    bad = tmp_path / "bad.json"
+    bad.write_text(json.dumps({"转向灯": []}, ensure_ascii=False), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="词典"):
+        load_expansions(bad)
