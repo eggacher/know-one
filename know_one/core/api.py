@@ -410,7 +410,9 @@ class KnowOne:
             raise InvalidArgument("创建 IndexGeneration 需要 embedding 模型配置")
 
         config = {
-            "chunker": "m1-pdf-section-v2",
+            # v3：段内新增次级标题短行软边界，避免表格被前置段落合并污染
+            # （transmission-001 病历）；■ 小节与超长句读兜底规则不变。
+            "chunker": "m1-pdf-section-v3-table",
             "embedding_model": self._embedding_model,
             "dimensions": self._embedding_dimensions,
             "full_text": FULL_TEXT_CONFIG_VERSION,
@@ -954,23 +956,72 @@ class KnowOne:
     def _split_pdf_paragraph(
         cls, raw_text: str, start: int, heading_path: tuple[str, ...]
     ) -> list[tuple[str, int, int, tuple[str, ...]]]:
-        """把过长 PDF 段落切为连续原文片段，优先保留 ``■`` 小节边界。"""
-        if len(raw_text) <= PDF_CHUNK_MAX_CHARS:
-            return [(raw_text, start, start + len(raw_text), heading_path)]
+        """把 PDF 段落切为连续原文片段，优先保留 ``■`` 小节与次级标题边界。
 
-        boundaries = [0]
-        boundaries.extend(
-            match.start() for match in re.finditer(r"(?m)^■", raw_text) if match.start() > 0
+        pdftotext 对部分页面不输出空行，次级标题（如「混合动力变速器」）
+        会连同前置段落与表格合并成一块，嵌入语义被前置段稀释；纯词短行
+        作为软边界让标题带表格独立成块（transmission-001 病历）。
+        """
+        boundaries = sorted(
+            {match.start() for match in re.finditer(r"(?m)^■", raw_text) if match.start() > 0}
+            | set(cls._pdf_subheading_offsets(raw_text))
         )
+        if not boundaries:
+            return cls._split_pdf_piece(raw_text, start, heading_path)
         boundaries.append(len(raw_text))
         chunks: list[tuple[str, int, int, tuple[str, ...]]] = []
-        for piece_start, piece_end in zip(boundaries, boundaries[1:]):
+        previous = 0
+        for boundary in boundaries:
             chunks.extend(
                 cls._split_pdf_piece(
-                    raw_text[piece_start:piece_end], start + piece_start, heading_path
+                    raw_text[previous:boundary], start + previous, heading_path
                 )
             )
+            previous = boundary
         return chunks
+
+    @classmethod
+    def _pdf_subheading_offsets(cls, raw_text: str) -> list[int]:
+        """识别段内次级标题短行，返回行首在段内的字符偏移。
+
+        收窄条件以防误切：纯词行（无任何空白，排除「R 倒车」「档位 目的
+        或功能」等表格数据行）、无句读标点、非纯数字页码、非 ■● 列表
+        标记；前行以句末标点收尾（排除「…请在 / 驾驶车辆前」跨行断词），
+        且后 2 行内紧随表格特征行（「短标签 空白 值」型）——只有带表格
+        的次级标题才开新块，其余短行一律保持原块，避免碎块与词频稀释。
+        """
+        lines = raw_text.split("\n")
+        offsets: list[int] = []
+        offset = 0
+        for index, line in enumerate(lines):
+            stripped = line.strip()
+            if (
+                0 < index < len(lines) - 1
+                and 2 <= len(stripped) <= 12
+                and not stripped.startswith(("■", "●", "○", "（"))
+                and not stripped.isdigit()
+                and not re.search(r"\s", stripped)
+                and not re.search(r"[。！？；，、：：]", stripped)
+                and re.search(r"[。！？]$", lines[index - 1].rstrip())
+                and any(
+                    cls._is_pdf_table_row(lines[j])
+                    for j in (index + 1, index + 2)
+                    if j < len(lines)
+                )
+            ):
+                offsets.append(offset)
+            offset += len(line) + 1
+        return offsets
+
+    @staticmethod
+    def _is_pdf_table_row(line: str) -> bool:
+        """识别「短标签 空白 值」型表格行，如「档位 目的或功能」「P 驻车 …」。"""
+        stripped = line.strip()
+        return bool(
+            0 < len(stripped) <= 42
+            and re.fullmatch(r"\S{1,12}[ \t　]+\S{1,30}", stripped)
+            and not re.search(r"[。！？；，]", stripped)
+        )
 
     @staticmethod
     def _split_pdf_piece(

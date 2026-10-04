@@ -70,7 +70,9 @@ def create_namespace(dsn: str, name: str) -> str:
     if not model or dimensions <= 0:
         raise ValueError("需要有效的 KNOWONE_EMBEDDING_MODEL 和 DIMENSIONS")
     config = {
-        "chunker": "m1-pdf-section-v2",
+        # v3-table：表格前次级标题开新块，表格与前置说明段分离；与
+        # api.create_index_generation 保持一致。
+        "chunker": "m1-pdf-section-v3-table",
         "embedding_model": model,
         "dimensions": dimensions,
         "full_text": FULL_TEXT_CONFIG_VERSION,
