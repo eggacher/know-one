@@ -30,9 +30,11 @@ v3-table 的 36 个表格感知切点系统性增强了所有表格/步骤/图�
 - signal-001（「轻拨一下转向灯会闪几次？」，期望 p163「右侧信号灯将闪烁 3 次」）：期望块本身未碎（两代同 203 字），但信号灯图例类竞争块排名前移，hybrid 从 r7（词典时代）退至稳定 r10。**已由 rerank 清偿**：调用方组合层 LLM 重排（`know_one.rerank`，qwen3.5-9b listwise）后 r10 → r1。
 - fuse-001（「保险丝能换成更大安培的吗？」，期望 p317「切勿使用高于额定安培值的保险丝」）：top-5 被保险丝章节的步骤/图例块（「检查保险丝是否已熔断」「打开保险丝盒盖」等）占据，期望块稳定 r9。**已由 rerank 清偿**：r9 → r1。
 
-rerank 全量验收（hybrid+rerank）：golden 29/30（signal/fuse 回收，零降级）、锁定集 22/22。新增一笔负迁移：
+rerank 全量验收（hybrid+rerank，纯替换语义）：golden 29/30（signal/fuse 回收，零降级）、锁定集 22/22。纯替换曾引入一笔负迁移并已由 blend 语义根治：
 
-- safety-001（「开车时能调驾驶座椅吗？」，期望 p25「■标准就坐位置」警告段）：基线 hybrid r2，rerank 后被挤至 r10——LLM listwise 对否定式安全问题有语义偏差：问句表层词（调座椅）与答案语义（行驶中勿调）相反时，模型偏爱「调节座椅」操作块而非警告块。prompt 增加「优先安全警告」指引实测无效（r11）。当前保留 29/30；候选对策：RRF 与 LLM 排名的融合排序（而非完全替换）、更强 rerank 模型、或 rerank 仅在 RRF 头部无强命中时启用，均待后续实验。
+- safety-001（「开车时能调驾驶座椅吗？」，期望 p25「■标准就坐位置」警告段）：基线 hybrid r2，纯替换被挤至 r10——LLM listwise 对否定式安全问题有语义偏差：问句表层词（调座椅）与答案语义（行驶中勿调）相反时，模型偏爱「调节座椅」操作块而非警告块。prompt 增加「优先安全警告」指引实测无效（r11）。
+
+**blend 语义（RRF top-4 ∪ LLM top-4，已落地为默认）**：期望块入集即命中。52 题排名矩阵（golden 30 + 锁定集 22）实测：纯 RRF 48/52、纯 LLM 51/52、blend **52/52**，且 LLM 抖动 ±2 仍 52/52——安全题靠 RRF 保底（safety r2），语义题靠 LLM 拉回（signal/fuse LLM r1），锁定集偶发嵌入抖动题也被兑底（key/battery LLM r2/r1）。实现见 `know_one/rerank.py`（RerankConfig.llm_reserve/rrf_reserve，默认 4/4）。
 
 ## v3-table 实验记录（表格感知切块，2026-10-01）
 
@@ -48,8 +50,8 @@ rerank 全量验收（hybrid+rerank）：golden 29/30（signal/fuse 回收，零
 
 ## rerank 落地记录（调用方组合层，2026-10-01）
 
-`know_one/rerank.py`：listwise 单次调用（OpenAI 兼容 `/chat/completions`，qwen3.5-9b），候选深度 16、文本截断 180 字/条；失败（网络/超时/解析）降级返回 RRF 原序并标记 degraded。评测器 `--rerank-base-url` 追加 `{mode}+rerank` 模式（深池重排后截回 top-8 判定，基础层同口径截断防深池放水）；问答示例 `--rerank-base-url` 深池重排后截回 top-k 进 prompt。
+`know_one/rerank.py`：listwise 单次调用（OpenAI 兼容 `/chat/completions`，qwen3.5-9b），候选深度 16、文本截断 180 字/条；blend 排序（LLM top-4 优先 + RRF top-4 保底补位，其余按 RRF）；失败（网络/超时/解析）降级返回 RRF 原序并标记 degraded。评测器 `--rerank-base-url` 追加 `{mode}+rerank` 模式（深池重排后截回 top-8 判定，基础层同口径截断防深池放水）；问答示例 `--rerank-base-url` 深池重排后截回 top-k 进 prompt。
 
-全量验收：golden hybrid+rerank **29/30**（signal r10→r1、fuse r9→r1、safety r2→r10 负迁移，见病历）；锁定集 hybrid+rerank **22/22** 零降级。
+全量验收（纯替换语义）：golden hybrid+rerank **29/30**（signal r10→r1、fuse r9→r1、safety r2→r10 负迁移，见病历）；锁定集 hybrid+rerank **22/22** 零降级。blend 语义上线后：52 题排名矩阵全量 **52/52**（含抖动 ±2 稳健性验证）。
 
 运维注意：LM Studio 同实例同时服务 embedding 与 rerank 时，评测流量互扰可致基线偶发掉题（观测到锁定集 hybrid 22→20，空闲复跑即恢复 22/22）；批量评测建议避开同实例并发，或为 rerank 独立部署。

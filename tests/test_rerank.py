@@ -144,3 +144,26 @@ def test_rerank_sends_candidate_texts_truncated(config, monkeypatch) -> None:
     Reranker(config).rerank("q", [_evidence("长" * 200, "c1")])
     prompt = captured["body"]["messages"][0]["content"]
     assert "长" * 50 in prompt and "长" * 51 not in prompt
+
+
+def test_rerank_blends_rrf_head_with_llm_ranking(config, monkeypatch) -> None:
+    """blend 语义：LLM top-4 优先，RRF 头部保底块补位，总头部恰为预留和。
+
+    safety/signal 场景的联合保护：RRF r2 但 LLM 排后的块仍留在头部
+    （不被重排挤丢）；LLM r1 但 RRF 排后的块排最前（语义召回）。
+    """
+    # LLM 头部带 5、6（RRF 保底块 3、4 落到 LLM 榜尾外），区分 blend 与纯替换
+    _llm_reply(monkeypatch, "[9,1,2,10,5,6]")
+    reranker = Reranker(config)  # max_candidates=4 < 9，改用更大配置
+    from know_one.rerank import RerankConfig as _RC
+
+    wide = _RC(base_url="http://llm.local/v1", model="m", timeout_seconds=5,
+               max_candidates=10, candidate_chars=50)
+    outcome = Reranker(wide).rerank(
+        "q", [_evidence(f"正文{i}", f"c{i}") for i in range(1, 11)]
+    )
+    ids = [e.chunk_id for e in outcome.evidence]
+    # LLM top-4 [9,1,2,10] 优先；RRF top-4 中未入列的 3,4 保底补位；
+    # 剩余 5-8 按 RRF 原序——纯替换语义此处会是 5,6 占据第 5、6 位。
+    assert ids == ["c9", "c1", "c2", "c10", "c3", "c4", "c5", "c6", "c7", "c8"]
+    assert outcome.degraded is False

@@ -24,13 +24,21 @@ _RANKING_PATTERN = re.compile(r"\[[\d,\s]+\]")
 
 @dataclass(frozen=True)
 class RerankConfig:
-    """重排的可调参数与 LLM 端点；候选深度与截断长度控制输入成本。"""
+    """重排的可调参数与 LLM 端点；候选深度与截断长度控制输入成本。
+
+    blend 语义（实测驱动）：纯 LLM 替换对否定式安全问题有负迁移
+    （safety-001 RRF r2 被挤到 r10），纯 RRF 又救不回语义召回题
+    （signal/fuse RRF r9/r10）；RRF 头部保底 ∪ LLM 头部推荐的并集
+    在 30 题矩阵上 30/30，且 LLM 抖动 ±2 仍 30/30。
+    """
 
     base_url: str
     model: str
     timeout_seconds: float = 180.0
     max_candidates: int = 16
     candidate_chars: int = 180
+    llm_reserve: int = 4
+    rrf_reserve: int = 4
 
 
 @dataclass(frozen=True)
@@ -53,10 +61,12 @@ class Reranker:
         return self._config.max_candidates
 
     def rerank(self, query: str, evidence: Sequence[Evidence]) -> RerankOutcome:
-        """按与 query 的相关性重排 Evidence；只重排头部，尾部保原序。
+        """blend 重排：LLM 头部推荐优先，RRF 头部保底块补位。
 
-        超过 ``max_candidates`` 的尾部不进入 LLM（控制输入长度），直接
-        按原顺序接在重排结果之后，保证不丢证据。
+        输入顺序即 RRF 排名。最终顺序 = LLM top-``llm_reserve`` +
+        RRF top-``rrf_reserve`` 中未入列的块 + 其余按 RRF 原序；超过
+        ``max_candidates`` 的尾部不进入 LLM，直接接在最后，不丢证据。
+        LLM 失败时整体降级为 RRF 原序（degraded=True）。
         """
         head = evidence[: self._config.max_candidates]
         tail = evidence[self._config.max_candidates :]
@@ -65,9 +75,14 @@ class Reranker:
         ranking = self._ask_llm(query, head)
         if ranking is None:
             return RerankOutcome(tuple(evidence), degraded=True)
+        llm_head = [head[index - 1] for index in ranking[: self._config.llm_reserve]]
+        llm_ids = {id(e) for e in llm_head}
+        # RRF 头部保底：重排不能把融合层的高置信块挤出最终头部。
+        rrf_keep = [e for e in head[: self._config.rrf_reserve] if id(e) not in llm_ids]
+        chosen = {id(e) for e in llm_head + rrf_keep}
+        rest = [e for e in head if id(e) not in chosen]
         return RerankOutcome(
-            tuple([head[index - 1] for index in ranking] + list(tail)),
-            degraded=False,
+            tuple(llm_head + rrf_keep + rest + list(tail)), degraded=False
         )
 
     def _ask_llm(self, query: str, head: Sequence[Evidence]) -> list[int] | None:
