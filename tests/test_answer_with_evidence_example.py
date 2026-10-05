@@ -467,3 +467,85 @@ def test_answer_example_applies_query_expansion_dictionary(monkeypatch, capsys, 
     assert received == ["轻拨一下转向灯会闪几次？ 转向信号灯"]
     report = json.loads(capsys.readouterr().out)
     assert report["expanded_query"] == "轻拨一下转向灯会闪几次？ 转向信号灯"
+
+
+def test_answer_example_reranks_deep_pool_before_answering(monkeypatch, capsys) -> None:
+    """--rerank-base-url 提供时：检索取深池、LLM 重排后只取前 top_k 进 prompt。"""
+    module = _example_module()
+    rerank = importlib.import_module("know_one.rerank")
+
+    class FakeKnowOne:
+        retrieve_top_k: list[object] = []
+
+        def __init__(self, _dsn: str) -> None:
+            pass
+
+        def retrieve(self, *_args: object, **kwargs: object) -> RetrievalResult:
+            FakeKnowOne.retrieve_top_k.append(kwargs["top_k"])
+            # 16 个候选，期望证据在第 10 位（top-3 外、重排深度内）。
+            evidence = tuple(
+                Evidence(
+                    text=f"无关候选{i}" if i != 10 else "保险丝切勿高于额定安培值。",
+                    document_id="document-1",
+                    revision_id="revision-1",
+                    chunk_id=f"chunk-{i}",
+                    source_locator={"page": 317},
+                    publication_valid_from=datetime(2026, 1, 1, tzinfo=UTC),
+                    publication_valid_until=None,
+                )
+                for i in range(1, 17)
+            )
+            return RetrievalResult(evidence, "generation-1", "test-model", "trace-1")
+
+    class OpenAIResponse:
+        def read(self) -> bytes:
+            return json.dumps(
+                {"choices": [{"message": {"content": "[10,1,2]"}}]}
+            ).encode()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args: object) -> bool:
+            return False
+
+    def rerank_urlopen(request, timeout: float):
+        assert request.full_url == "http://llm.local:1234/v1/chat/completions"
+        payload = json.loads(request.data.decode("utf-8"))
+        assert payload["model"] == "qwen3.5-9b"
+        assert "保险丝能换更大安培" in payload["messages"][0]["content"]
+        return OpenAIResponse()
+
+    def answer_urlopen(request, timeout: float):
+        # 回答 prompt 只应包含重排后的前 3 个候选（第 10 位已被提到首位）。
+        payload = json.loads(request.data.decode("utf-8"))
+        assert "保险丝切勿高于额定安培值。" in payload["input"]
+        assert "无关候选9" not in payload["input"]
+        return type(
+            "R",
+            (),
+            {
+                "read": lambda self: '{"output":[{"type":"message","content":"切勿换更大安培值。[证据 1]"}]}'.encode(),
+                "__enter__": lambda self: self,
+                "__exit__": lambda self, *a: False,
+            },
+        )()
+
+    monkeypatch.setattr(module, "KnowOne", FakeKnowOne)
+    monkeypatch.setattr(rerank, "urlopen", rerank_urlopen)
+    monkeypatch.setattr(module, "urlopen", answer_urlopen)
+
+    assert module.main(
+        [
+            "--namespace", "manuals", "--principal", "reader",
+            "--query", "保险丝能换更大安培的吗",
+            "--dsn", "postgresql://test",
+            "--llm-base-url", "http://lm.local:1234/api/v1",
+            "--rerank-base-url", "http://llm.local:1234/v1",
+        ]
+    ) == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report["answer"] == "切勿换更大安培值。[证据 1]"
+    assert report["rerank_degraded"] is False
+    # 深池 16 供重排，最终只取 top-k=3。
+    assert FakeKnowOne.retrieve_top_k == [16]

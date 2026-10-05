@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import replace
 from datetime import datetime
 import json
 import os
@@ -17,6 +18,7 @@ from know_one import AccessScope, KnowOne
 from know_one.config import load_local_env
 from know_one.errors import KnowOneError
 from know_one.query_expansion import expand_query, load_expansions
+from know_one.rerank import RerankConfig, Reranker
 
 
 DEFAULT_LM_STUDIO_BASE_URL = "http://192.168.2.6:1234/api/v1"
@@ -70,6 +72,16 @@ def _parser() -> argparse.ArgumentParser:
         help="查询扩展词典 JSON（口语词 → 手册术语），检索前追加进查询",
     )
     parser.add_argument("--answer-timeout-seconds", type=float, default=60)
+    parser.add_argument(
+        "--rerank-base-url",
+        help="OpenAI 兼容 rerank LLM 根路径（如 http://host:1234/v1）；提供时检索取深池重排后截回 top-k",
+    )
+    parser.add_argument(
+        "--rerank-timeout-seconds",
+        type=float,
+        default=180.0,
+        help="单次 rerank LLM 调用超时；超时降级为 RRF 顺序",
+    )
     parser.add_argument(
         "--include-timings",
         action="store_true",
@@ -340,15 +352,34 @@ def main(argv: Sequence[str] | None = None) -> int:
         # 契约规定口语补全由调用方完成：词典命中时追加手册术语后再检索。
         expansions = load_expansions(arguments.expansions) if arguments.expansions else None
         expanded_query = expand_query(arguments.query, expansions)
+        # rerank 是调用方组合层：检索取深池，LLM 重排后只截回 top-k 进 prompt。
+        reranker = (
+            Reranker(
+                RerankConfig(
+                    base_url=arguments.rerank_base_url,
+                    model=arguments.llm_model,
+                    timeout_seconds=arguments.rerank_timeout_seconds,
+                )
+            )
+            if arguments.rerank_base_url
+            else None
+        )
+        retrieve_k = (
+            max(arguments.top_k, reranker.max_candidates) if reranker else arguments.top_k
+        )
         retrieval_started_at = monotonic()
         result = KnowOne(arguments.dsn).retrieve(
             expanded_query,
             arguments.namespace,
             scope,
-            top_k=arguments.top_k,
+            top_k=retrieve_k,
             deadline_ms=arguments.deadline_ms,
             include_context=arguments.context_neighbors,
         )
+        if reranker is not None:
+            outcome = reranker.rerank(expanded_query, result.evidence)
+            result = replace(result, evidence=outcome.evidence[: arguments.top_k])
+            rerank_degraded = outcome.degraded
         retrieval_ms = round((monotonic() - retrieval_started_at) * 1000)
         if not result.evidence:
             report = {"answer": None, "citations": [], "status": "no_evidence"}
@@ -458,6 +489,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     # 仅在调用方显式传词典时记录实际检索查询，报告结构对既有消费方保持不变。
     if arguments.expansions:
         report["expanded_query"] = expanded_query
+    # 仅在启用 rerank 层时暴露降级状态，供调用方监控重排可用性。
+    if arguments.rerank_base_url:
+        report["rerank_degraded"] = rerank_degraded
     print(json.dumps(report, ensure_ascii=False, sort_keys=True))
     return 0
 

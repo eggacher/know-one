@@ -197,6 +197,10 @@ def _parser() -> argparse.ArgumentParser:
         type=Path,
         help="查询扩展词典 JSON，透传给回答示例在检索前追加手册术语",
     )
+    parser.add_argument(
+        "--rerank-base-url",
+        help="OpenAI 兼容 rerank LLM 根路径，透传给回答示例：深池重排后截回 top-k",
+    )
     return parser
 
 
@@ -226,6 +230,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         # 词典交给回答示例内部加载与扩展，两处共用 know_one.query_expansion 实现。
         if arguments.expansions:
             command.extend(["--expansions", str(arguments.expansions)])
+        # rerank 层同样由回答示例内部执行，这里只透传端点。
+        if arguments.rerank_base_url:
+            command.extend(["--rerank-base-url", arguments.rerank_base_url])
         with redirect_stdout(output), redirect_stderr(output):
             try:
                 exit_code = module.main(command)

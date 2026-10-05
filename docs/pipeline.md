@@ -1,6 +1,6 @@
 # KnowOne 流水线
 
-状态：M1 已实现纯文本、Markdown 和文本层 PDF 的来源快照、段落切块、embedding、中文全文／向量召回与 RRF 融合；上下文补全（`include_context`，相邻块不参与主排序）与调用方查询扩展（`know_one.query_expansion` 词典，口语词→手册术语）已实现。本文其余清洗、词典、语义切块、rerank 内容为后续设计，不应误解为现有运行路径。发布与权限契约见 [contracts.md](contracts.md)，切块规则见 [chunking.md](chunking.md)。
+状态：M1 已实现纯文本、Markdown 和文本层 PDF 的来源快照、段落切块、embedding、中文全文／向量召回与 RRF 融合；上下文补全（`include_context`，相邻块不参与主排序）、调用方查询扩展（`know_one.query_expansion` 词典，口语词→手册术语）与调用方组合层 LLM rerank（`know_one.rerank`，深池→listwise 重排→截回 top-k，失败降级 RRF 顺序）已实现；表格感知切块已落地（`m1-pdf-section-v3-table`）。本文其余清洗、词典、语义切块、rerank 核心集成内容为后续设计，不应误解为现有运行路径。发布与权限契约见 [contracts.md](contracts.md)，切块规则见 [chunking.md](chunking.md)。
 
 ## 入库：构建与发布分离
 

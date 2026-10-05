@@ -394,3 +394,99 @@ def test_load_expansions_rejects_malformed_dictionary(tmp_path) -> None:
 
     with pytest.raises(ValueError, match="词典"):
         load_expansions(bad)
+
+
+def test_smoke_cli_applies_rerank_layer_when_rerank_llm_provided(
+    tmp_path, capsys, monkeypatch
+) -> None:
+    """--rerank-base-url 为每路追加 {mode}+rerank 模式：取更深候选重排后截回 top_k。"""
+    dataset = tmp_path / "smoke.jsonl"
+    dataset.write_text(
+        json.dumps(
+            {
+                "id": "manual-001",
+                "query": "如何保养",
+                "expected_any": ["定期保养"],
+                "expected_pages": [92],
+            },
+            ensure_ascii=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    class FakeKnowOne:
+        """返回 16 个候选，期望证据位于第 10 位（top-8 外、重排深度内）。"""
+
+        def __init__(self, dsn: str) -> None:
+            self.top_k_values: list[object] = []
+
+        def retrieve(self, query: str, namespace: str, access_scope, **kwargs: object) -> RetrievalResult:
+            self.top_k_values.append(kwargs["top_k"])
+            evidence = tuple(
+                Evidence(
+                    text=f"第{i}条无关内容" if i != 10 else "定期保养的原文",
+                    document_id="document-1",
+                    revision_id="revision-1",
+                    chunk_id=f"chunk-{i}",
+                    source_locator={"page": 92},
+                    publication_valid_from=datetime(2026, 9, 1, tzinfo=UTC),
+                    publication_valid_until=None,
+                )
+                for i in range(1, 17)
+            )
+            return RetrievalResult(
+                evidence=evidence,
+                index_generation="generation-1",
+                model_version="test-model",
+                trace_id="trace-1",
+            )
+
+    class FakeReranker:
+        """把第 10 位（期望证据）提到首位，模拟 LLM 语义重排。"""
+
+        observed_depths: list[int] = []
+        max_candidates = 16  # 与默认 RerankConfig 对齐，控制重排深度
+
+        def __init__(self, config: object) -> None:
+            pass
+
+        def rerank(self, query: str, evidence: Sequence[Evidence]) -> object:
+            FakeReranker.observed_depths.append(len(evidence))
+            head = list(evidence)
+            rescued = head.pop(9)
+            class _Outcome:
+                evidence = tuple([rescued] + head)
+                degraded = False
+            return _Outcome()
+
+    import know_one.eval.smoke as smoke_module
+
+    monkeypatch.setattr(smoke_module, "KnowOne", FakeKnowOne)
+    monkeypatch.setattr(smoke_module, "Reranker", FakeReranker)
+
+    assert main(
+        [
+            "--dataset",
+            str(dataset),
+            "--namespace",
+            "rav4",
+            "--principal",
+            "evaluator",
+            "--dsn",
+            "postgresql://test",
+            "--rerank-base-url",
+            "http://llm.local/v1",
+            "--rerank-model",
+            "test-model",
+        ]
+    ) == 0
+
+    report = json.loads(capsys.readouterr().out)
+    # 原三模式保持（RRF 顺序第 10 位 → 全部 miss）；rerank 层命中。
+    assert report["modes"]["hybrid"] == {"hits": 0, "hit_rate": 0.0, "miss_ids": ["manual-001"]}
+    assert report["modes"]["hybrid+rerank"]["hits"] == 1
+    assert report["modes"]["hybrid+rerank"]["miss_ids"] == []
+    assert report["modes"]["vector+rerank"]["hits"] == 1
+    # rerank 深度必须大于最终 top_k：retrieve 取候选深度 16，判定只看前 8。
+    assert FakeReranker.observed_depths and set(FakeReranker.observed_depths) == {16}

@@ -14,6 +14,7 @@ from know_one import AccessScope, KnowOne
 from know_one.config import load_local_env
 from know_one.errors import KnowOneError
 from know_one.query_expansion import expand_query, load_expansions
+from know_one.rerank import RerankConfig, Reranker
 
 
 RECALL_MODES = ("full_text", "vector", "hybrid")
@@ -130,8 +131,14 @@ def evaluate(
     deadline_ms: int,
     include_miss_evidence: bool = False,
     expansions: Mapping[str, Sequence[str]] | None = None,
+    reranker: Reranker | None = None,
 ) -> dict:
-    """逐路执行受约束检索，返回可审阅的命中率和漏检样本 ID。"""
+    """逐路执行受约束检索，返回可审阅的命中率和漏检样本 ID。
+
+    传入 reranker 时，每路额外产生 ``{mode}+rerank`` 模式：检索取更深的
+    候选池（rerank 深度），重排后只截回 top_k 判定——模拟真实部署中
+    「融合 top-16 → 重排 → 取 top-8」的组合层行为。
+    """
     # 跨块答案需要补充上下文才能判定；主证据排序与数量不受其影响。
     needs_context = any(case.expected_context_any is not None for case in cases)
     expanded_queries = {
@@ -142,33 +149,55 @@ def evaluate(
     )
     modes: dict[str, dict] = {}
     for recall_mode in RECALL_MODES:
-        miss_ids: list[str] = []
-        miss_evidence: dict[str, list[str]] = {}
-        for case in cases:
-            result = know_one.retrieve(
-                expanded_queries[case.identifier],
-                namespace,
-                scope,
-                at=at,
-                top_k=top_k,
-                deadline_ms=deadline_ms,
-                recall_mode=recall_mode,
-                include_context=needs_context,
-            )
-            evidence_texts = tuple(evidence.text for evidence in result.evidence)
-            if not any(_matches_case(case, evidence) for evidence in result.evidence):
-                miss_ids.append(case.identifier)
-                if include_miss_evidence:
-                    # 仅输出已经判定为漏检的候选，避免常规评测报告重复整批原文。
-                    miss_evidence[case.identifier] = list(evidence_texts)
-        hits = len(cases) - len(miss_ids)
-        modes[recall_mode] = {
-            "hits": hits,
-            "hit_rate": hits / len(cases),
-            "miss_ids": miss_ids,
-        }
-        if include_miss_evidence:
-            modes[recall_mode]["miss_evidence"] = miss_evidence
+        # rerank 层需要更深的候选池；普通模式维持调用方 top_k。
+        retrieve_k = max(top_k, reranker.max_candidates) if reranker else top_k
+        # 未提供 reranker 时只跑基础层；提供时基础层与 rerank 层并列报告。
+        layers: list[tuple[str, Reranker | None]] = [("", None)]
+        if reranker is not None:
+            layers.append(("+rerank", reranker))
+        for suffix, rerank_layer in layers:
+            miss_ids: list[str] = []
+            miss_evidence: dict[str, list[str]] = {}
+            degraded_count = 0
+            for case in cases:
+                result = know_one.retrieve(
+                    expanded_queries[case.identifier],
+                    namespace,
+                    scope,
+                    at=at,
+                    top_k=retrieve_k,
+                    deadline_ms=deadline_ms,
+                    recall_mode=recall_mode,
+                    include_context=needs_context,
+                )
+                if rerank_layer is not None:
+                    outcome = rerank_layer.rerank(
+                        expanded_queries[case.identifier], result.evidence
+                    )
+                    degraded_count += int(outcome.degraded)
+                    # 两个层级都只看前 top_k：基础层不因深池放水（候选深度
+                    # 仅为 rerank 提供输入），rerank 层在重排后截取头部。
+                    ranked = outcome.evidence[:top_k]
+                else:
+                    ranked = result.evidence[:top_k]
+                if not any(_matches_case(case, evidence) for evidence in ranked):
+                    miss_ids.append(case.identifier)
+                    if include_miss_evidence:
+                        # 仅输出已经判定为漏检的候选，避免常规评测报告重复整批原文。
+                        miss_evidence[case.identifier] = [
+                            evidence.text for evidence in ranked[:top_k]
+                        ]
+            hits = len(cases) - len(miss_ids)
+            mode_key = f"{recall_mode}{suffix}"
+            modes[mode_key] = {
+                "hits": hits,
+                "hit_rate": hits / len(cases),
+                "miss_ids": miss_ids,
+            }
+            if suffix:
+                modes[mode_key]["degraded"] = degraded_count
+            if include_miss_evidence:
+                modes[mode_key]["miss_evidence"] = miss_evidence
     return {
         "total_cases": len(cases),
         "modes": modes,
@@ -213,6 +242,21 @@ def _parser() -> argparse.ArgumentParser:
         type=Path,
         help="调用方查询扩展词典 JSON（口语词 → 手册术语），检索前追加进查询",
     )
+    parser.add_argument(
+        "--rerank-base-url",
+        help="提供时为每路追加 rerank 层（OpenAI 兼容 /chat/completions），如 http://host:1234/v1",
+    )
+    parser.add_argument(
+        "--rerank-model",
+        default="qwen3.5-9b",
+        help="rerank 层使用的 LLM 模型名",
+    )
+    parser.add_argument(
+        "--rerank-timeout-seconds",
+        type=float,
+        default=180.0,
+        help="单次 rerank LLM 调用超时；超时降级为 RRF 顺序",
+    )
     return parser
 
 
@@ -229,6 +273,17 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         cases = load_cases(arguments.dataset)
         expansions = load_expansions(arguments.expansions) if arguments.expansions else None
+        reranker = (
+            Reranker(
+                RerankConfig(
+                    base_url=arguments.rerank_base_url,
+                    model=arguments.rerank_model,
+                    timeout_seconds=arguments.rerank_timeout_seconds,
+                )
+            )
+            if arguments.rerank_base_url
+            else None
+        )
         scope = AccessScope(
             arguments.principal,
             frozenset({arguments.namespace}),
@@ -244,6 +299,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             deadline_ms=arguments.deadline_ms,
             include_miss_evidence=arguments.include_miss_evidence,
             expansions=expansions,
+            reranker=reranker,
         )
     except (OSError, RuntimeError, ValueError, KnowOneError) as error:
         parser.error(str(error))
