@@ -1,8 +1,8 @@
 # RAV4 混动版 Golden Set 草案
 
-此文件对应 `hybrid_golden_draft.jsonl` 的首批 30 条候选。每一条的支持短语和页码均从 `RAV4HEV用户手册（混动版）.pdf` 逐字摘取，但 `review_status` 为 `pending`，因此不能替代 `hybrid_smoke.jsonl` 作为锁定验收集。一个问题可列出多个等价的原文支持短语及页码，避免手册在不同章节重复表达同一安全要求时造成误判。
+此文件对应 `hybrid_golden_draft.jsonl` 的首批 30 条候选。每一条的支持短语和页码均从 `RAV4HEV用户手册（混动版）.pdf` 逐字摘取，2026-10-01 已完成人工复核：30 条全部通过（含自动校验：短语为手册原文、页码全部命中），`review_status` 均为 `approved`，并复制为版本化锁定集 `hybrid_golden_v1.jsonl`。一个问题可列出多个等价的原文支持短语及页码，避免手册在不同章节重复表达同一安全要求时造成误判。
 
-人工复核时，应确认问题确实代表目标用户表达、短语足以支持问题结论、页码适用于当前发布版本；通过后将 `review_status` 改为 `approved`，并复制到版本化的锁定集。拒答问题应单独加入回答层数据集，不应放入检索 smoke。
+与 `hybrid_smoke.jsonl`（22 条）的口径区别：smoke 走无词典无 rerank 的裸检索基线；golden 验收集带词典（模拟真实部署配置），可叠加 rerank 层（`--rerank-base-url`）。两条命令口径不可混用。
 
 ## 查询扩展词典（query_expansions.json）
 
