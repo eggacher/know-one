@@ -1,0 +1,18 @@
+{"id": "rav4-gas-safety-001", "query": "开车前所有人都要系安全带吗？", "recall_threshold": 8, "expected_any": ["确保所有乘员均已系好座椅安全带"], "expected_pages": [26], "review_status": "draft"}
+{"id": "rav4-gas-cargo-001", "query": "行李可以放在驾驶员脚边吗？", "recall_threshold": 8, "expected_any": ["不要将货物或行李放入或放在下列位置"], "expected_pages": [136], "review_status": "draft"}
+{"id": "rav4-gas-child-001", "query": "后向儿童座椅为什么不能装某些位置？", "recall_threshold": 8, "expected_any": ["不得在受正面安全气囊保护"], "expected_pages": [42], "review_status": "draft"}
+{"id": "rav4-gas-hood-001", "query": "关发动机盖时要注意什么？", "recall_threshold": 8, "expected_any": ["请务必将支撑杆装回其卡扣内"], "expected_pages": [326], "review_status": "draft"}
+{"id": "rav4-gas-warn-001", "query": "仪表警告信息应该怎么处理？", "recall_threshold": 8, "expected_any": ["检查并按照多信息显示屏上的信息进行操作"], "expected_pages": [374], "review_status": "draft"}
+{"id": "rav4-gas-audio-001", "query": "打电话会让音响有杂音吗？", "recall_threshold": 8, "expected_any": ["音响系统扬声器可能会发出干扰"], "expected_pages": [244], "review_status": "draft"}
+{"id": "rav4-gas-snow-001", "query": "雪地模式会被自动取消吗？", "recall_threshold": 8, "expected_any": ["雪地模式自动取消"], "expected_pages": [209], "review_status": "draft"}
+{"id": "rav4-gas-idle-001", "query": "等红灯时发动机自动熄火正常吗？", "recall_threshold": 8, "expected_any": ["发动机将自动停止"], "expected_pages": [198], "review_status": "draft"}
+{"id": "rav4-gas-sport-001", "query": "什么情况适合用运动模式？", "recall_threshold": 8, "expected_any": ["适用于需要精确操控时"], "expected_pages": [204], "review_status": "draft"}
+{"id": "rav4-gas-maint-001", "query": "保养按里程还是按时间？", "recall_threshold": 8, "expected_any": ["以先达到者为准"], "expected_pages": [318], "review_status": "draft"}
+{"id": "rav4-gas-tire-001", "query": "怎么判断轮胎该换了？", "recall_threshold": 8, "expected_any": ["检查轮胎上是否出现胎面磨损标记"], "expected_pages": [334], "review_status": "draft"}
+{"id": "rav4-gas-spare-001", "query": "轮胎不换位的话备胎要检查吗？", "recall_threshold": 8, "expected_any": ["如果不换位，请检查备胎的状况和气压"], "expected_pages": [334], "review_status": "draft"}
+{"id": "rav4-gas-fuel-001", "query": "碰撞后发动机自己熄火是怎么回事？", "recall_threshold": 8, "expected_any": ["燃油泵关闭系统"], "expected_pages": [366], "review_status": "draft"}
+{"id": "rav4-gas-tow-001", "query": "拖车时钢索要固定在哪里？", "recall_threshold": 8, "expected_any": ["将钢索或安全链条紧固在拖曳环上"], "expected_pages": [365], "review_status": "draft"}
+{"id": "rav4-gas-pshift-001", "query": "为什么提示请换至 P 档？", "recall_threshold": 8, "expected_any": ["驻车时请换至 P 档"], "expected_pages": [376], "review_status": "draft"}
+{"id": "rav4-gas-maint-002", "query": "八万公里之后多久保养一次？", "recall_threshold": 8, "expected_any": ["每行驶 20000 km （公里）或每隔 12 个月检查一次"], "expected_pages": [319], "review_status": "draft"}
+{"id": "rav4-gas-backdoor-001", "query": "背门开关没反应怎么办？", "recall_threshold": 8, "expected_any": ["可从车内解锁背门"], "expected_pages": [104], "review_status": "draft"}
+{"id": "rav4-gas-coolant-001", "query": "冷却液泄漏怎么检查？", "recall_threshold": 8, "expected_any": ["请联系丰田经销店等测试盖压并检查冷却系统是否泄漏"], "expected_pages": [331], "review_status": "draft"}
