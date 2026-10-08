@@ -1,169 +1,209 @@
 # KnowOne
 
-可嵌入 Python 业务系统的知识入库与检索库，首个落地场景是中文客服 FAQ 和公告。
+可嵌入 Python 业务系统的知识入库与检索库。将 FAQ、公告和文本层 PDF 构建成可检索的证据，支持版本发布、权限过滤和原文定位；当前以 RAV4 中文手册验证完整流程。
 
-**当前状态：已具备纯文本、Markdown 与文本层 PDF 入库、IndexGeneration 重建切换、发布、受约束的全文/向量混合检索，以及 Document 撤回、ACL 更新和立即删除。HTML 解析与重排尚未实现，也没有商用性能或质量验证。**
+## 当前能力
 
-## 范围与职责
+- **入库**：纯文本、Markdown、文本层 PDF；来源快照、幂等提交、持久化任务和 worker 租约恢复。
+- **版本与权限**：Namespace 隔离、Document ACL、生效时间和业务适用范围过滤；Revision 发布、撤回和删除。
+- **检索**：jieba 中文分词 + PostgreSQL 原生全文检索、pgvector 向量检索，以及 RRF 混合排序。
+- **证据**：返回原文、PDF 原始页码、字符区间、标题路径和版本；按需补充相邻块上下文。
+- **索引升级**：在独立 IndexGeneration 中重建，完成后原子切换。
+- **调用方增强**：词典查询扩展、可选 LLM rerank，以及带证据引用和拒答状态的 LM Studio 回答示例。
 
-KnowOne 负责知识构建、版本发布、受约束的混合检索及证据返回。调用方负责身份认证、授权范围的计算、对话上下文、生成、拒答和转人工；KnowOne 负责执行调用方传入的可信授权范围。
+HTML、扫描 PDF 的自动 OCR、通用复杂表格解析尚未作为核心入库能力提供。RAV4 目录中的表格抽取和 VLM 校验属于专项实验。项目已有小规模回归记录，尚无商用容量、延迟或全面质量验收结论。
 
-当前接收审核过的 FAQ 文本、Markdown 和文本层 PDF；工单应先脱敏、提炼、审核。HTML、扫描 PDF、复杂表格和图片解析是后续能力，不在首版自动处理承诺内。首版仍需保证失败可见、来源可追溯。
+## 工作流程
 
-核心库可被在线进程和后台 worker 共同引用。耗时入库在后台执行，模型使用共享推理端点或批准的数据处理 API。无需先建设独立 SaaS。
+```text
+资料 → 来源快照与入库任务 → 解析、切块 → 全文索引与 embedding
+     → ready（待审核）→ 发布 → 可检索证据
 
-## 目标接口
+用户问题 → 可选词典扩展 → 全文召回 + 向量召回 → RRF 融合
+         → 可选 rerank → 原文证据 → 调用方生成带引用的回答
+```
 
-`KnowOne` 可从根包导入。以下入库、发布和检索流程均可运行；参数、错误和一致性以 [接口契约](docs/contracts.md) 为准。
+核心 `retrieve()` 返回证据。调用方负责身份认证、可信 AccessScope、对话上下文和回答生成。查询扩展与 rerank 由调用方显式启用。
+
+当前 PDF 切块保留页边界，识别小节和表格前标题，并对长段按句末标点拆分。400 字符是拆分阈值；没有合适句界时块可能超过该值。它不是固定 token 切块，也不是每页只生成一个向量。标题路径目前单独存储，未额外拼入 embedding 文本。
+
+## 本地启动
+
+需要 Python 3.12+、Docker Compose，以及提供 OpenAI 兼容 `/v1/embeddings` 的模型服务。PDF 解析另需 Poppler 的 `pdftotext`，macOS 可通过 `brew install poppler` 安装。
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -e '.[dev]'
+cp .env.example .env
+docker compose up -d db
+```
+
+修改 `.env`，将 embedding 服务地址与模型名设为服务实际提供的值：
+
+```dotenv
+KNOWONE_DSN=postgresql://knowone:knowone@localhost:5432/knowone
+KNOWONE_EMBEDDING_ENDPOINT=http://localhost:1234/v1
+KNOWONE_EMBEDDING_MODEL=Qwen/Qwen3-Embedding-0.6B
+KNOWONE_EMBEDDING_DIMENSIONS=1024
+```
+
+示例数据库账号仅供本地开发。`.env` 不提交到 Git；已有进程环境变量优先于 `.env`。模型名和维度会冻结到索引代，必须与模型服务一致。
+
+```bash
+python -m know_one init-db
+python -m know_one create-namespace demo
+python -m know_one --help
+```
+
+`init-db` 只用于空数据库。已有数据库升级需先审阅 [迁移文件](know_one/storage/migrations/)。
+
+## Python 示例：入库、发布、检索
+
+在完成上述初始化后运行：
 
 ```python
-# 调用方完成身份认证并计算可信 scope；客户端不能自行指定授权范围。
+from datetime import datetime, timezone
+import os
+
 from know_one import AccessScope, KnowOne
+from know_one.config import load_local_env
 from know_one.ingestion import TextSource
 
-kb = KnowOne("postgresql://knowone:knowone@localhost:5432/knowone")
-editor_scope = AccessScope("editor-1", frozenset({"game-a-cs"}), frozenset({"ingest"}))
-publisher_scope = AccessScope("publisher-1", frozenset({"game-a-cs"}), frozenset({"publish"}))
-source = TextSource("问题：怎么找回密码？\n\n答案：请在登录页选择“忘记密码”。")
-job = kb.ingest(source, namespace="game-a-cs",
-                source_key="official/faq/password", access_scope=editor_scope,
-                idempotency_key="import-20260923-001")
-kb.process_job(job.job_id)  # M1 worker 入口；生产环境由后台 worker 调用。
-status = kb.get_ingestion(job.job_id, access_scope=editor_scope)
-# ready 表示构建完成、尚未发布。运营预览通过后：
-kb.publish(status.revision_id, namespace="game-a-cs",
-           valid_from=effective_time, valid_until=None,
-           expected_generation=state_generation,
-           access_scope=publisher_scope, idempotency_key="publish-001")
-
-result = kb.retrieve(query="怎么找回密码啊", namespace="game-a-cs",
-                     access_scope=reader_scope, top_k=8)
-# result.evidence：原文、来源定位、revision、排序信息
-# result.degraded / warnings / trace_id：运行状态
+load_local_env()
+kb = KnowOne(os.environ["KNOWONE_DSN"])
+# 本地演示身份；业务系统需在认证后由服务端计算可信权限。
+scope = AccessScope(
+    "demo-operator", frozenset({"demo"}), frozenset({"ingest", "publish", "read"})
+)
+job = kb.ingest(
+    TextSource("找回密码：请在登录页选择“忘记密码”，按提示重置。"),
+    namespace="demo",
+    source_key="faq/password",
+    access_scope=scope,
+    idempotency_key="demo-import-001",
+)
+# 演示同步构建；部署时由后台 worker 领取和处理任务。
+kb.process_job(job.job_id)
+status = kb.get_ingestion(job.job_id, access_scope=scope)
+if status.status != "ready":
+    raise RuntimeError(f"入库未完成：{status.status}")
+# 首次发布新 Document 的状态代号为 0；后续更新需使用实际状态代号。
+kb.publish(
+    status.revision_id,
+    namespace="demo",
+    valid_from=datetime(2026, 1, 1, tzinfo=timezone.utc),
+    valid_until=None,
+    expected_generation=0,
+    access_scope=scope,
+    idempotency_key="demo-publish-001",
+)
+result = kb.retrieve(
+    "忘记密码怎么办？", namespace="demo", access_scope=scope,
+    recall_mode="hybrid", top_k=8, deadline_ms=15000,
+)
+for evidence in result.evidence:
+    print(evidence.text, evidence.source_locator)
 ```
 
-文本层 PDF 可通过 `PdfSource` 入库；页码范围会随原文快照保存，后续
-IndexGeneration 重建仍只处理相同页段，Evidence 的 `source_locator.page` 为原始
-PDF 页码。该能力依赖系统的 `pdftotext`；macOS 可执行 `brew install poppler`：
+`ready` 表示构建完成，发布后才能检索。相同业务请求重试应复用幂等键；修改内容需新键。`result.degraded`、`warnings` 和 `trace_id` 用于诊断失败与降级。接口边界见 [接口契约](docs/contracts.md)。
 
-```python
-from pathlib import Path
+## PDF 与回答示例
 
-from know_one.ingestion import PdfSource
-
-source = PdfSource(Path("data/manual.pdf"), first_page=92, last_page=102)
-```
-
-扫描件、图片和复杂表格不自动 OCR，解析失败时任务会明确失败而不会发布不完整内容。
-
-业务进程直接调用时，按当前已认证的身份构造 `AccessScope`，再把返回的
-Evidence 交给自己的回答层；不要让浏览器提交 `principal` 或 Scope。可先运行
-[`examples/query_evidence.py`](examples/query_evidence.py) 检查检索与引用：
+PDF 可直接使用 `PdfSource(Path("data/manual.pdf"), first_page=1, last_page=20)`，也可提交后台任务：
 
 ```bash
-PYTHONPATH=. .venv/bin/python examples/query_evidence.py \
-  --namespace rav4-smoke-pdf --principal evaluator \
-  --query "油枪自动跳枪后还要继续加油吗？" --deadline-ms 15000
-```
-
-输出 JSON 包含 Evidence 原文、`source_locator.page`、标题路径、版本与告警；示例不调用 LLM、也不生成回答。
-
-提交新 PDF 时可使用 [`examples/submit_pdf.py`](examples/submit_pdf.py)。该脚本只创建来源快照和 queued 入库任务，随后由 worker 构建，不能跳过审核自动发布：
-
-```bash
-PYTHONPATH=. .venv/bin/python examples/submit_pdf.py \
-  --namespace manuals --principal editor \
-  --source-key manual/rav4-2026 --pdf data/manual.pdf \
-  --first-page 92 --last-page 102 --idempotency-key rav4-pages-92-102-v1
+PYTHONPATH=. python examples/submit_pdf.py \
+  --namespace demo --principal demo-operator \
+  --source-key manual/example --pdf data/manual.pdf \
+  --idempotency-key manual-import-001
 python -m know_one process-next-job
 ```
 
-任务到 ready 后，读取其 `revision_id` 并使用受控 `publish` 命令发布；同一文件提交重试必须复用相同 `idempotency-key`。
+提交脚本输出 `job_id`；通过 `get_ingestion()` 获取任务状态和 `revision_id`，审核 ready 版本后调用 `publish()`。该流程保留 PDF 原始页码；选择页段入库不会将页码重编号。
 
-如需本地 LLM 回答，可运行 [`examples/answer_with_evidence.py`](examples/answer_with_evidence.py)。它使用 LM Studio 原生 `/api/v1/chat`，默认连接 `192.168.2.6:1234` 的 `qwen3.5-9b`；只在检索到 Evidence 时调用模型。模型以 `[证据 N]` 标记事实依据，脚本只返回这些实际引用的 Evidence，并从其 `source_locator` 构造权威页码。若模型判断资料不足，返回 `insufficient_evidence` 与空引用；若模型遗漏有效证据编号，返回 `uncited_answer`，不把未绑定回答交给调用方；检索本身为空时返回 `no_evidence`。可通过 `KNOWONE_ANSWER_BASE_URL`、`KNOWONE_ANSWER_MODEL` 与可选的 `KNOWONE_ANSWER_API_TOKEN` 覆盖本地配置：
+已发布资料可通过命令行检索：
 
 ```bash
-PYTHONPATH=. .venv/bin/python examples/answer_with_evidence.py \
-  --namespace rav4-smoke-pdf --principal evaluator \
-  --query "油枪自动跳枪后还要继续加油吗？" --deadline-ms 15000
+PYTHONPATH=. python examples/query_evidence.py \
+  --namespace demo --principal demo-operator \
+  --query "忘记密码怎么办？" --deadline-ms 15000
 ```
 
-追加 `--stream` 时，脚本使用 LM Studio 的 SSE 流式协议输出 JSON Lines：模型先发出有效 `[证据 N]`，脚本随即输出带权威 locator 的 `verified_citation` 事件，之后的 `verified_text` 才逐增量出现。最后一行仍是完整的权威结果 JSON，调用方应以该行的 `status` 与 `citations` 决定是否正式展示或保存回答。
-
-业务侧的同步结果、流式事件、状态码与失败关闭规则见[调用方回答集成契约](docs/answer-integration.md)。
-
-部署前可先运行 [`examples/preflight.py`](examples/preflight.py)，它只读检查 PostgreSQL/pgvector/schema、`pdftotext`、embedding 和 LM Studio 目标模型，不会入库、发布或触发 LLM 生成：
+回答示例使用 LM Studio 原生 `/api/v1/chat`；其地址与模型通过参数显式指定：
 
 ```bash
-PYTHONPATH=. .venv/bin/python examples/preflight.py
+PYTHONPATH=. python examples/answer_with_evidence.py \
+  --namespace demo --principal demo-operator \
+  --query "忘记密码怎么办？" --deadline-ms 15000 \
+  --llm-base-url http://localhost:1234/api/v1 --llm-model qwen3.5-9b
 ```
 
-当前保留原始 query，不做 LLM 改写。检索时限定 Namespace、当前权限、发布状态、生效时间和业务适用范围，再执行向量与关键词召回及 RRF 融合；尚未实现 rerank。生成示例放在调用方；首版不实现 `answer()`。
+可添加 `--stream` 输出流式事件，添加 `--rerank-base-url http://localhost:1234/v1` 启用重排。回答脚本还支持 `KNOWONE_ANSWER_BASE_URL`、`KNOWONE_ANSWER_MODEL` 和可选的 `KNOWONE_ANSWER_API_TOKEN`。
 
-## 起步选型
+引用页码由 Evidence 的定位信息构造。无证据、资料不足或回答未绑定有效证据时，脚本分别返回 `no_evidence`、`insufficient_evidence` 或 `uncited_answer`。集成方式见 [回答集成契约](docs/answer-integration.md)；依赖检查可运行 `PYTHONPATH=. python examples/preflight.py --llm-base-url http://localhost:1234/api/v1`。
 
-- Python ≥ 3.12；目前使用标准库数据类型、psycopg 和 pytest。
-- PostgreSQL + pgvector + PostgreSQL 原生全文检索；原生全文排序不称为 BM25。
-- BGE-M3 作为向量基线候选，reranker 固定具体模型版本后评测；不预设其为业务最优。
-- 结构优先切块，按中文句子边界组合，token 上限兜底；embedding 语义切块作为对照实验。
-- 复用宿主任务机制；没有现成机制时用 PostgreSQL 持久任务表和 worker，首版不强制增加消息队列。
-- InMemory 实现仅用于流程测试，真实检索验收使用 PostgreSQL。
+## 检索与评测
 
-## 本地骨架验证
+`recall_mode` 支持 `full_text`、`vector`、`hybrid`。hybrid 当前采用加权 RRF，全文权重 0.25、向量权重 1.0，并保留向量首位候选。全文使用 PostgreSQL 原生排序，不是 BM25。
+
+查询扩展在原问题末尾追加命中词典的术语，例如“转向灯”追加“转向信号灯”。rerank 默认取 16 条候选，结合 LLM 前 4 条和输入排序前 4 条保底，再截回 top-k；失败时保留输入顺序并报告降级。
+
+RAV4 资料需自行放入被 Git 忽略的 `data/`，准备流程见 [RAV4 示例](examples/rav4/README.md)。在资料已经入库并发布后运行裸检索回归：
 
 ```bash
-python -m pip install -e '.[dev]'
-cp .env.example .env
+python -m know_one.eval.smoke \
+  --dataset examples/rav4/eval/hybrid_smoke.jsonl \
+  --namespace rav4-hybrid --principal evaluator \
+  --top-k 8 --deadline-ms 15000
+```
+
+带词典和 rerank 的评测另行指定配置：
+
+```bash
+python -m know_one.eval.smoke \
+  --dataset examples/rav4/eval/hybrid_golden_v1.jsonl \
+  --namespace rav4-hybrid --principal evaluator \
+  --expansions examples/rav4/eval/query_expansions.json \
+  --rerank-base-url http://localhost:1234/v1 --rerank-model qwen3.5-9b \
+  --top-k 8 --deadline-ms 15000
+```
+
+评测按题计算 Hit@k：忽略空白后，`expected_any` 中任一短语出现在某条 Evidence 正文即可；指定 `expected_pages` 时须同时命中页码。`expected_context_any` 是同一条 Evidence 的补充上下文条件。该指标不衡量全部相关证据的召回率，也不直接衡量答案正确率。
+
+[历史评测记录](docs/dev-journey.md)中：混动裸 hybrid 为 22/22，混动词典 + rerank 为 30/30，汽油 hybrid + rerank 为 18/18，回答层 smoke 为 5/5。这些是特定索引、模型和小型样本集下的历史结果；回答层 smoke 校验引用页码与拒答状态。复测时应固定资料版本、索引代、模型和配置。
+
+## 索引升级与维护
+
+更换 embedding 模型、维度或切块配置时，先调整配置，再创建独立索引代：
+
+```bash
+python -m know_one create-index-generation demo
+python -m know_one rebuild-index-generation demo <generation-id>
+python -m know_one activate-index-generation demo <generation-id>
+```
+
+只有完成全量 Revision 构建的索引代才能激活。发布、撤回、ACL 更新和删除可通过 CLI 执行；`--actor` 是审计身份，本地管理命令不能直接暴露成公共接口。具体一致性与删除边界见 [接口契约](docs/contracts.md)。
+
+开发检查：
+
+```bash
 python -m pytest -q
-docker compose up -d db
-python -m know_one init-db
-python -m know_one create-namespace game-a-cs
 ```
 
-`know_one/model/__init__.py` 定义公开数据类型，`know_one/core/api.py` 定义 `KnowOne` 业务门面；`python -m know_one --help` 可查看本地管理命令。复制 [`.env.example`](.env.example) 为 `.env` 后可统一设置 `KNOWONE_DSN`、`KNOWONE_EMBEDDING_ENDPOINT`、`KNOWONE_EMBEDDING_MODEL` 和 `KNOWONE_EMBEDDING_DIMENSIONS`。默认模型为 `Qwen/Qwen3-Embedding-0.6B`、1024 维；显式参数和进程环境变量优先于 `.env`。`create-namespace` 会将当前模型、维度和切块配置冻结到首个 active IndexGeneration。`init-db` 使用 `know_one/storage/schema.sql` 初始化空数据库，只应执行一次。已有旧 schema 的开发库需先人工审阅并执行 `know_one/storage/migrations/0001_persist_ingestion_source.sql`；该迁移拒绝为旧任务伪造来源快照。
+依赖 PostgreSQL 或模型服务的集成检查需要对应环境；跳过的检查不代表已完成真实部署验证。
 
-升级 embedding 或切块配置时，先将 `.env` 改为目标配置，再依次执行：
+## 代码与文档
 
-```bash
-python -m know_one create-index-generation game-a-cs
-python -m know_one rebuild-index-generation game-a-cs <generation-id>
-python -m know_one activate-index-generation game-a-cs <generation-id>
-```
-
-重建在隔离的 building generation 中进行；最后一个命令仅在该 Namespace 的全部 Revision 都已完成构建时才会原子切换，新入库随后写入新代。
-
-发布和生命周期变更也只通过受控的本地管理员进程执行；`--actor` 只记录审计操作者，不能自选权限。不要将这些命令直接暴露给浏览器或公共 HTTP 接口。
-
-```bash
-python -m know_one publish game-a-cs <revision-id> 2026-09-29T09:00:00+08:00 \
-  --expected-generation 0 --idempotency-key publish-001
-python -m know_one withdraw game-a-cs <document-id> \
-  --expected-generation 1 --idempotency-key withdraw-001
-python -m know_one set-access game-a-cs <document-id> '{"principals":["operator"]}' \
-  --expected-generation 2 --idempotency-key acl-001
-python -m know_one delete game-a-cs <document-id> --idempotency-key delete-001
-```
-
-`delete` 会立即清理该 Document 的正文、Revision、Chunk 和 Publication，并保留最小删除审计记录。
-
-## 文档入口
-
-| 文档 | 负责回答的问题 |
+| 入口 | 内容 |
 |---|---|
-| [术语表](CONTEXT.md) | Document、Revision、Publication、Chunk 的含义 |
-| [架构](docs/architecture.md) | 运行形态、职责、数据关系、演进方式 |
-| [接口契约](docs/contracts.md) | 权限、发布、幂等、时点查询、失败语义 |
-| [流水线](docs/pipeline.md) | 解析、召回、过滤、重排和降级 |
-| [切块策略](docs/chunking.md) | NLP 是否更好、默认规则、对照实验 |
-| [运行保障](docs/operations.md) | 任务恢复、观测、容量、成本、备份 |
-| [验收计划](docs/evaluation.md) | Golden Set、指标口径、上线门槛 |
-| [架构决策](docs/adr/) | 关键取舍及原因 |
-
-## 实施顺序
-
-1. 真实样本与正确性基线：确认数据使用范围，构建人工标注集；实现版本模型、权限、原文定位和单库检索。
-2. 受控试点：完成后台入库、发布撤回、结构切块、混合检索、可选重排；业务人员审核答案。
-3. 商用放量：通过质量、权限、故障、性能、成本及恢复验收，再逐步扩大流量。
-4. 按失败样例演进：语义切块、复杂格式、BM25 或独立搜索引擎，都需要对照评测支持。
-
-默认参数是实验起点。业务数据、部署资源和流量尚未确定，不能据此承诺准确率、容量或响应时间。
+| [know_one/core/api.py](know_one/core/api.py) | KnowOne 业务门面、入库与检索流程 |
+| [know_one/model](know_one/model/) | AccessScope、Evidence 等公开数据类型 |
+| [know_one/cli.py](know_one/cli.py) | 本地管理命令 |
+| [examples](examples/) | PDF 提交、检索、回答、预检和 RAV4 实验 |
+| [术语与领域模型](CONTEXT.md) | Document、Revision、Publication、Chunk |
+| [架构](docs/architecture.md) / [接口契约](docs/contracts.md) | 职责、权限、版本、生效时间、幂等 |
+| [流水线](docs/pipeline.md) / [切块策略](docs/chunking.md) | 当前实现与后续设计；以各文档状态说明为准 |
+| [Golden Set 编写](docs/golden-set-authoring.md) / [验收计划](docs/evaluation.md) | 标注口径与后续验收指标 |
+| [开发历程](docs/dev-journey.md) | 切块、融合、词典和重排的历史排查与实验 |
+| [运行保障](docs/operations.md) / [架构决策](docs/adr/) | 运维与设计取舍 |

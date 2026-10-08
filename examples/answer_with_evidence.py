@@ -21,7 +21,7 @@ from know_one.query_expansion import expand_query, load_expansions
 from know_one.rerank import RerankConfig, Reranker
 
 
-DEFAULT_LM_STUDIO_BASE_URL = "http://192.168.2.6:1234/api/v1"
+DEFAULT_LM_STUDIO_BASE_URL = "http://localhost:1234/api/v1"
 DEFAULT_LM_STUDIO_MODEL = "qwen3.5-9b"
 _MODEL_PAGE_REFERENCE = re.compile(r"[，,]?\s*第\s*\d+\s*页")
 _EVIDENCE_REFERENCE = re.compile(r"\[(?:证据\s*)?(\d+)\]")

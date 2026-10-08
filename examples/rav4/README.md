@@ -35,7 +35,7 @@ workdir/                 # 产物，不入库（.gitignore）
 ## 依赖与模型
 
 - pdftotext（poppler）、pypdf
-- LM Studio `http://192.168.2.6:1234`：
+- LM Studio `http://localhost:1234`（也可通过脚本参数改为实际地址）：
   embedding 用 `text-embedding-qwen3-embedding-0.6b`，
   扫描/表格用 `qwen3-vl-4b-instruct`，文本推理用 `qwen3.5-9b`
 

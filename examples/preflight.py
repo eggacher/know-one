@@ -13,7 +13,7 @@ from know_one.config import load_local_env
 from know_one.embedding import OpenAIEmbeddingClient
 
 
-DEFAULT_LM_STUDIO_BASE_URL = "http://192.168.2.6:1234/api/v1"
+DEFAULT_LM_STUDIO_BASE_URL = "http://localhost:1234/api/v1"
 DEFAULT_LM_STUDIO_MODEL = "qwen3.5-9b"
 
 

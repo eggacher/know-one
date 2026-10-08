@@ -174,7 +174,7 @@ class KnowOne:
         Args:
             dsn: PostgreSQL 连接串（ADR-0004）。未传入时读取 ``KNOWONE_DSN``。
             embedding_endpoint: embedding 模型端点（OpenAI 兼容接口，
-                如 LM Studio ``http://192.168.2.6:1234/v1``）；
+                如 LM Studio ``http://localhost:1234/v1``）；
                 None 时从环境变量 KNOWONE_EMBEDDING_ENDPOINT 读取。
                 外部模型调用一律不进入数据库事务（pipeline.md「切块、向量化与写入」）。
             embedding_model: embedding 模型标识；None 时读取

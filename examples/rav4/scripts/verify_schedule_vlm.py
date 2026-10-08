@@ -31,7 +31,7 @@ FILES = {
     "hybrid": "RAV4HEV用户手册（混动版）.pdf",
 }
 
-API = "http://192.168.2.6:1234/v1/chat/completions"
+API = "http://localhost:1234/v1/chat/completions"
 MODEL = "qwen3-vl-4b-instruct"
 
 MAIN_PROMPT = """这是丰田RAV4用户手册「定期保养计划」表的一页。请只依据图片，
